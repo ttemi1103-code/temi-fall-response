@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 下載的模型，請依 README 取得
+*.task
+
+# 實驗紀錄與影片可能拍到受測者，不上傳
+fall_response/logs/
+*.mp4
+*.avi
+*.mov
+
+# 帳號密碼
+.env
+auth.py
