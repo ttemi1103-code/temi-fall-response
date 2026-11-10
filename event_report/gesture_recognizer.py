@@ -17,6 +17,7 @@ C1：肢體確認（先提出問題，再辨識長者的肢體回應）
     python gesture_recognizer.py camera                                 # 開攝影機看辨識效果（不問問題、不送 C2）
     python gesture_recognizer.py ask                                    # 問「要不要打電話」，看點頭／搖頭
     python gesture_recognizer.py ask --purpose consciousness            # 問「聽得到請舉手」，看舉手
+    python gesture_recognizer.py ask --purpose all                      # 測試用：兩題依序都問
     python gesture_recognizer.py ask --event-id e001                    # 問完把結果送給 C2
     python gesture_recognizer.py server                                 # 等待指令（port 8001），收到就提問並觀察
 
@@ -604,8 +605,8 @@ def run_demo():
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="C1 肢體確認（提問＋舉手／點頭／搖頭）")
     ap.add_argument("mode", nargs="?", default="demo", choices=["demo", "camera", "ask", "server"])
-    ap.add_argument("--purpose", default="call_consent", choices=list(QUESTIONS),
-                    help="ask 模式要問的問題：call_consent（要不要打電話）或 consciousness（聽得到請舉手）")
+    ap.add_argument("--purpose", default="call_consent", choices=list(QUESTIONS) + ["all"],
+                    help="ask 模式要問的問題：call_consent（要不要打電話）、consciousness（聽得到請舉手）、all（兩題都問）")
     ap.add_argument("--event-id", help="把結果送給 C2 時使用的事件編號")
     ap.add_argument("--source", default=CONFIG["SOURCE"], help="攝影機編號或影片／串流網址（預設 0）")
     ap.add_argument("--seconds", type=float, default=CONFIG["OBSERVE_SECONDS"], help="觀察秒數")
@@ -620,6 +621,17 @@ if __name__ == "__main__":
         sys.exit(0 if run_demo() else 1)
     elif args.mode == "server":
         run_server(show=not args.no_window)
+    elif args.mode == "ask" and args.purpose == "all":
+        # 測試用：兩題依序問完。實際流程只會依語音結果問其中一題，所以這裡不送給 C2
+        if args.event_id:
+            print("[C1] --purpose all 只用來測試，不會把結果送給 C2")
+        results = {}
+        for purpose in ("consciousness", "call_consent"):
+            results[purpose] = ask(purpose, args.source, args.seconds, show=not args.no_window)
+        print("\n===== 兩題結果 =====")
+        for purpose, gestures in results.items():
+            label = "意識確認（請舉手）" if purpose == "consciousness" else "是否需要打電話（點頭／搖頭）"
+            print(f"{label}：{'、'.join(GESTURE_TEXT.get(g, g) for g in gestures) or '未做出指定動作'}")
     elif args.mode == "ask":
         ask(args.purpose, args.source, args.seconds, show=not args.no_window, event_id=args.event_id)
     elif args.event_id:

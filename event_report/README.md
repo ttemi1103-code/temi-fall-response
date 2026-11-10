@@ -68,6 +68,7 @@ C1（肢體辨識結果）     ─┘                                           
 | C1：開鏡頭看辨識效果 | `python gesture_recognizer.py camera` |
 | C1：問「要不要打電話」，看點頭／搖頭 | `python gesture_recognizer.py ask` |
 | C1：問「聽得到請舉手」，看舉手 | `python gesture_recognizer.py ask --purpose consciousness` |
+| C1：測試用，兩題依序都問 | `python gesture_recognizer.py ask --purpose all` |
 | C1：問完把結果送給 C2 | `python gesture_recognizer.py ask --event-id e001` |
 | C1：等待 `/start` 指令再提問（port 8001） | `python gesture_recognizer.py server` |
 | 啟動主程式（port 8000） | `python event_reporter.py server` |
