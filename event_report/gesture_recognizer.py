@@ -1,39 +1,36 @@
 """
-C1：肢體確認（先提出問題，再辨識長者的肢體回應）
+C1：肢體反應確認（先提出問題，再辨識長者的肢體回應）
 
-依語音確認的結果，提出不同的問題：
-    語音有回應 → purpose = call_consent
-        「需要幫你打電話給家人嗎？需要請點頭，不需要請搖頭」
-        只看 nod 點頭（要打電話）／ shake_head 搖頭（不用打）
-    語音沒回應 → purpose = consciousness
-        「如果你聽得到，請舉起你的手」
-        只看 raise_hand 舉手（還有意識）
-辨識結果送給 C2（event_reporter.py）：
-    POST http://<C2>/gesture  {"event_id": "...", "purpose": "call_consent", "gestures": ["nod"]}
-沒做出指定動作就送空清單 []。
+依專題流程，只有「有語音回應」時才做肢體確認。長者已能說話，所以這裡確認的是身體能不能動，
+以及長者要不要協助。依序問三題：
+    1. arms         「請把兩隻手都舉起來。」            → 左右手各自有沒有舉起（both / left / right / none）
+    2. legs         「請動一動你的腳。」                → 腳有沒有動
+    3. call_consent 「需要幫你打電話給家人嗎？需要請點頭，不需要請搖頭。」→ nod / shake_head
+三題問完，把結果一起送給 C2（event_reporter.py）：
+    POST http://<C2>/gesture
+    {"event_id": "...", "arms": "both", "arm_raised": true, "leg_moved": true, "call_consent": "nod"}
 
 使用方式：
-    python gesture_recognizer.py demo                                   # 用假資料測試辨識邏輯（不需攝影機、不需安裝套件）
-    python gesture_recognizer.py camera                                 # 開攝影機看辨識效果（不問問題、不送 C2）
-    python gesture_recognizer.py ask                                    # 問「要不要打電話」，看點頭／搖頭
-    python gesture_recognizer.py ask --purpose consciousness            # 問「聽得到請舉手」，看舉手
-    python gesture_recognizer.py ask --purpose all                      # 測試用：兩題依序都問
-    python gesture_recognizer.py ask --event-id e001                    # 問完把結果送給 C2
-    python gesture_recognizer.py server                                 # 等待指令（port 8001），收到就提問並觀察
+    python gesture_recognizer.py demo                          # 用假資料測試辨識邏輯（不需攝影機、不需安裝套件）
+    python gesture_recognizer.py camera                        # 開攝影機看辨識效果（不問問題、不送 C2）
+    python gesture_recognizer.py ask                           # 三題依序問完，顯示結果
+    python gesture_recognizer.py ask --event-id e001           # 三題問完，結果送給 C2
+    python gesture_recognizer.py ask --purpose legs            # 只測其中一題：arms / legs / call_consent
+    python gesture_recognizer.py server                        # 等待指令（port 8001），收到就開始三題確認
 
-server 模式的介面（給 B 組或 Temi 呼叫，語音確認結束後呼叫）：
-    POST /start  {"event_id": "e001", "purpose": "call_consent", "seconds": 10}
+server 模式的介面（B 組或 Temi 在語音確認「有回應」後呼叫）：
+    POST /start  {"event_id": "e001", "seconds": 10}
 
 提問方式：電腦上用 Windows 內建語音唸出問題（沒有中文語音就只顯示文字，可用 --no-voice 關掉）。
 之後接上 Temi 時，改由 Temi 唸問題，這裡只負責觀察。
 
-需要套件：pip install opencv-python mediapipe
-（demo 模式只用標準函式庫）
-第一次執行 camera / server 會自動下載 MediaPipe 姿勢模型（約 5MB）到 models/ 資料夾。
+需要套件：python -m pip install opencv-python mediapipe（demo 模式只用標準函式庫）
+第一次執行 camera / ask / server 會自動下載 MediaPipe 姿勢模型（約 5MB）到 models/ 資料夾。
 
 辨識原理（MediaPipe Pose 33 個關鍵點）：
-    舉手：手腕沿著「臀部→肩膀」的身體方向，比肩膀高出一段距離，並維持一小段時間。
-          用身體方向而不是畫面上下，所以坐著、半躺著也能判斷。
+    舉手：手腕沿著「臀部→肩膀」的身體方向，比肩膀高出一段距離，並維持一小段時間；左右手分開判斷。
+          用身體方向而不是畫面上下，所以坐著、躺著也能判斷。
+    動腳：腳踝（看不到就用膝蓋）相對臀部的位置，在短時間內移動超過「軀幹長度 × 比例」。
     點頭／搖頭：以兩耳連線建立頭部座標，追蹤鼻子相對兩耳的位置。
           左右來回擺動 → 搖頭；上下來回擺動 → 點頭。
 """
@@ -59,8 +56,8 @@ from typing import Optional
 CONFIG = {
     "C2_URL": os.getenv("C2_URL", "http://127.0.0.1:8000"),   # event_reporter.py 的位址
     "SOURCE": os.getenv("CAMERA_SOURCE", "0"),                 # 攝影機編號，或影片檔／串流網址
-    "OBSERVE_SECONDS": float(os.getenv("OBSERVE_SECONDS", "10")),  # 每次觀察幾秒
-    "EARLY_STOP": os.getenv("EARLY_STOP", "1") == "1",         # 辨識到動作就提早結束
+    "OBSERVE_SECONDS": float(os.getenv("OBSERVE_SECONDS", "10")),  # 每題最多觀察幾秒
+    "EARLY_STOP": os.getenv("EARLY_STOP", "1") == "1",         # 辨識到完整動作就提早進下一題
     "VOICE": os.getenv("C1_VOICE", "1") == "1",                # 用電腦語音唸出問題
     "HOST": os.getenv("HOST", "0.0.0.0"),
     "PORT": int(os.getenv("C1_PORT", "8001")),
@@ -76,6 +73,8 @@ PARAMS = {
     "MIN_VISIBILITY": 0.5,      # 關鍵點可信度低於此值就不用
     "RAISE_RATIO": 0.5,         # 手腕比肩膀高出「肩寬 × 此值」才算舉手
     "RAISE_HOLD_SEC": 0.6,      # 舉手要維持幾秒
+    "LEG_MOVE_RATIO": 0.15,     # 腳踝移動超過「軀幹長度 × 此值」才算動腳
+    "LEG_WINDOW_SEC": 2.0,      # 在幾秒內看腳的移動幅度
     "YAW_THRESHOLD": 0.12,      # 搖頭：鼻子左右擺動幅度（以兩耳距離為單位）
     "PITCH_THRESHOLD": 0.08,    # 點頭：鼻子上下擺動幅度（以兩耳距離為單位）
     "MIN_SWINGS": 3,            # 來回擺動幾次才算（例如 左→右→左 = 3 次）
@@ -84,42 +83,36 @@ PARAMS = {
     "SMOOTHING": 0.5,           # 數值平滑（0~1，越大越平滑）
 }
 
-GESTURE_TEXT = {"raise_hand": "舉手", "nod": "點頭", "shake_head": "搖頭"}
+GESTURE_TEXT = {
+    "raise_hand": "舉手", "raise_both": "舉起雙手", "move_leg": "動腳",
+    "nod": "點頭", "shake_head": "搖頭",
+}
+ARMS_TEXT = {"both": "雙手都舉起", "left": "只舉起左手", "right": "只舉起右手", "none": "沒有舉手"}
 
-# 每種確認要問的問題，以及這個問題只接受哪些動作（想改問法改這裡）
+# 三題肢體確認（想改問法改 prompt）：accept = 這題算哪些動作；stop_on = 看到哪個動作就提早結束
 QUESTIONS = {
+    "arms": {
+        "prompt": "請把兩隻手都舉起來。",
+        "accept": {"raise_hand", "raise_both"},
+        "stop_on": {"raise_both"},
+    },
+    "legs": {
+        "prompt": "請動一動你的腳。",
+        "accept": {"move_leg"},
+        "stop_on": {"move_leg"},
+    },
     "call_consent": {
         "prompt": "需要幫你打電話給家人嗎？需要請點頭，不需要請搖頭。",
         "accept": {"nod", "shake_head"},
-    },
-    "consciousness": {
-        "prompt": "如果你聽得到，請舉起你的手。",
-        "accept": {"raise_hand"},
+        "stop_on": {"nod", "shake_head"},
     },
 }
-
-
-def speak(text: str) -> None:
-    """用 Windows 內建語音唸出問題；失敗（例如沒有中文語音、非 Windows）就只顯示文字"""
-    print(f"\n🔊 Temi：「{text}」")
-    if not CONFIG["VOICE"] or sys.platform != "win32":
-        return
-    import subprocess
-    script = (
-        "Add-Type -AssemblyName System.Speech;"
-        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-        "$v = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -like 'zh-*' } | Select-Object -First 1;"
-        "if ($v) { $s.SelectVoice($v.VoiceInfo.Name); $s.Speak($env:C1_SPEAK_TEXT) }"
-    )
-    try:
-        subprocess.run(["powershell", "-NoProfile", "-Command", script], timeout=20,
-                       env=dict(os.environ, C1_SPEAK_TEXT=text), capture_output=True)
-    except Exception as e:
-        print(f"[C1] 語音播放失敗，只顯示文字：{e}")
+QUESTION_ORDER = ["arms", "legs", "call_consent"]
 
 # MediaPipe Pose 關鍵點編號
 NOSE, L_EYE, R_EYE, L_EAR, R_EAR = 0, 2, 5, 7, 8
 L_SHOULDER, R_SHOULDER, L_WRIST, R_WRIST, L_HIP, R_HIP = 11, 12, 15, 16, 23, 24
+L_KNEE, R_KNEE, L_ANKLE, R_ANKLE = 25, 26, 27, 28
 
 
 @dataclass
@@ -203,7 +196,9 @@ class SwingCounter:
 class GestureDetector:
     def __init__(self, params: Optional[dict] = None):
         self.p = dict(PARAMS, **(params or {}))
-        self.raise_since: Optional[float] = None
+        self.raise_since: dict[str, Optional[float]] = {"left": None, "right": None}
+        self.arms_held: set[str] = set()          # 觀察期間「有成功舉起」的手
+        self.leg_hist: deque[tuple[float, dict]] = deque()
         self.yaw_counter = SwingCounter(self.p["YAW_THRESHOLD"], self.p["SWING_WINDOW_SEC"])
         self.pitch_counter = SwingCounter(self.p["PITCH_THRESHOLD"], self.p["SWING_WINDOW_SEC"])
         self.yaw_hist: deque[tuple[float, float]] = deque()
@@ -216,26 +211,57 @@ class GestureDetector:
     def _ok(self, pt: Optional[Point]) -> bool:
         return pt is not None and pt.visibility >= self.p["MIN_VISIBILITY"]
 
-    # ---------- 舉手 ----------
-    def _hand_raised(self, lm: dict[int, Point]) -> bool:
+    def _body_up(self, lm: dict[int, Point]) -> tuple[float, float]:
+        ls, rs, lh, rh = lm.get(L_SHOULDER), lm.get(R_SHOULDER), lm.get(L_HIP), lm.get(R_HIP)
+        if all(self._ok(p) for p in (ls, rs, lh, rh)):
+            return unit(sub(mid(ls, rs), mid(lh, rh)))   # 臀部 → 肩膀 = 身體的「上」
+        return (0.0, -1.0)                               # 看不到臀部就用畫面的上方
+
+    # ---------- 舉手（左右分開） ----------
+    def _hands_raised(self, lm: dict[int, Point]) -> dict[str, bool]:
+        out = {"left": False, "right": False}
         ls, rs = lm.get(L_SHOULDER), lm.get(R_SHOULDER)
         if not (self._ok(ls) and self._ok(rs)):
-            return False
+            return out
         shoulder_w = norm(sub(ls, rs))
         if shoulder_w < 1e-3:
-            return False
-        lh, rh = lm.get(L_HIP), lm.get(R_HIP)
-        if self._ok(lh) and self._ok(rh):
-            up = unit(sub(mid(ls, rs), mid(lh, rh)))        # 臀部 → 肩膀 = 身體的「上」
-        else:
-            up = (0.0, -1.0)                                # 看不到臀部就用畫面的上方
-        best = -9.0
-        for wrist_id, shoulder in ((L_WRIST, ls), (R_WRIST, rs)):
+            return out
+        up = self._body_up(lm)
+        for side, wrist_id, shoulder in (("left", L_WRIST, ls), ("right", R_WRIST, rs)):
             w = lm.get(wrist_id)
             if self._ok(w):
-                best = max(best, dot(sub(w, shoulder), up) / shoulder_w)
-        self.debug["raise"] = best
-        return best >= self.p["RAISE_RATIO"]
+                score = dot(sub(w, shoulder), up) / shoulder_w
+                self.debug[f"hand_{side}"] = score
+                out[side] = score >= self.p["RAISE_RATIO"]
+        return out
+
+    # ---------- 動腳 ----------
+    def _leg_moved(self, lm: dict[int, Point], t: float) -> bool:
+        ls, rs, lh, rh = lm.get(L_SHOULDER), lm.get(R_SHOULDER), lm.get(L_HIP), lm.get(R_HIP)
+        if not all(self._ok(p) for p in (ls, rs, lh, rh)):
+            return False
+        hip = mid(lh, rh)
+        torso = norm(sub(mid(ls, rs), hip))
+        if torso < 1e-3:
+            return False
+        pts = {}
+        for name, ids in (("left", (L_ANKLE, L_KNEE)), ("right", (R_ANKLE, R_KNEE))):
+            p = next((lm.get(i) for i in ids if self._ok(lm.get(i))), None)
+            if p is not None:
+                pts[name] = ((p.x - hip.x) / torso, (p.y - hip.y) / torso)   # 相對臀部，人整個移動不算
+        if not pts:
+            return False
+        self.leg_hist.append((t, pts))
+        while self.leg_hist and t - self.leg_hist[0][0] > self.p["LEG_WINDOW_SEC"]:
+            self.leg_hist.popleft()
+        best = 0.0
+        for side in ("left", "right"):
+            xs = [h[side][0] for _, h in self.leg_hist if side in h]
+            ys = [h[side][1] for _, h in self.leg_hist if side in h]
+            if xs:
+                best = max(best, math.hypot(max(xs) - min(xs), max(ys) - min(ys)))
+        self.debug["leg"] = best
+        return best >= self.p["LEG_MOVE_RATIO"]
 
     # ---------- 頭部方向 ----------
     def _head_pose(self, lm: dict[int, Point]) -> Optional[tuple[float, float]]:
@@ -266,24 +292,35 @@ class GestureDetector:
     def _add(self, g: str, new: list[str]):
         if g not in self.detected:
             self.detected.append(g)
-        new.append(g)
+            new.append(g)
 
     def update(self, lm: Optional[dict[int, Point]], t: float) -> list[str]:
-        """lm：{關鍵點編號: Point}，沒偵測到人就傳 None；t：秒。回傳這一幀觸發的動作。"""
+        """lm：{關鍵點編號: Point}，沒偵測到人就傳 None；t：秒。回傳這一幀新辨識到的動作。"""
         new: list[str] = []
         if not lm:
-            self.raise_since = None
+            self.raise_since = {"left": None, "right": None}
             return new
 
-        # 舉手：要持續一段時間，避免揮過去就算
-        if self._hand_raised(lm):
-            if self.raise_since is None:
-                self.raise_since = t
-            elif t - self.raise_since >= self.p["RAISE_HOLD_SEC"]:
-                self._add("raise_hand", new)
-                self.raise_since = None
-        else:
-            self.raise_since = None
+        # 舉手：左右手各自要維持一段時間，避免揮過去就算
+        raised = self._hands_raised(lm)
+        holding = set()
+        for side, up in raised.items():
+            if not up:
+                self.raise_since[side] = None
+                continue
+            if self.raise_since[side] is None:
+                self.raise_since[side] = t
+            if t - self.raise_since[side] >= self.p["RAISE_HOLD_SEC"]:
+                holding.add(side)
+                self.arms_held.add(side)
+        if holding:
+            self._add("raise_hand", new)
+        if holding == {"left", "right"}:
+            self._add("raise_both", new)
+
+        # 動腳
+        if self._leg_moved(lm, t):
+            self._add("move_leg", new)
 
         # 點頭／搖頭
         hp = self._head_pose(lm)
@@ -314,21 +351,73 @@ class GestureDetector:
             self.pitch_counter.reset()
         return new
 
+    # ---------- 把觀察結果整理成每一題的答案 ----------
+    def arms_result(self) -> str:
+        if self.arms_held >= {"left", "right"}:
+            return "both"
+        if self.arms_held:
+            return next(iter(self.arms_held))
+        return "none"
+
+    def answer(self, purpose: str):
+        if purpose == "arms":
+            return self.arms_result()
+        if purpose == "legs":
+            return "move_leg" in self.detected
+        if purpose == "call_consent":
+            return next((g for g in self.detected if g in ("nod", "shake_head")), "")
+        raise ValueError(purpose)
+
+
+def answer_text(purpose: str, ans) -> str:
+    if purpose == "arms":
+        return ARMS_TEXT[ans]
+    if purpose == "legs":
+        return "有動腳" if ans else "沒有動腳"
+    return {"nod": "點頭（需要打電話）", "shake_head": "搖頭（不需要打電話）"}.get(ans, "沒有點頭或搖頭")
+
 
 # ============================================================
-# 把結果送給 C2
+# 提問（電腦語音）與把結果送給 C2
 # ============================================================
-def send_to_c2(event_id: str, gestures: list[str], purpose: str = "") -> Optional[dict]:
-    payload = {"event_id": event_id, "gestures": gestures}
-    if purpose:
-        payload["purpose"] = purpose
+def speak(text: str) -> None:
+    """用 Windows 內建語音唸出問題；失敗（例如沒有中文語音、非 Windows）就只顯示文字"""
+    print(f"\n🔊 Temi：「{text}」")
+    if not CONFIG["VOICE"] or sys.platform != "win32":
+        return
+    import subprocess
+    script = (
+        "Add-Type -AssemblyName System.Speech;"
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+        "$v = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -like 'zh-*' } | Select-Object -First 1;"
+        "if ($v) { $s.SelectVoice($v.VoiceInfo.Name); $s.Speak($env:C1_SPEAK_TEXT) }"
+    )
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", script], timeout=20,
+                       env=dict(os.environ, C1_SPEAK_TEXT=text), capture_output=True)
+    except Exception as e:
+        print(f"[C1] 語音播放失敗，只顯示文字：{e}")
+
+
+def to_c2_payload(event_id: str, results: dict) -> dict:
+    arms = results.get("arms", "none")
+    return {
+        "event_id": event_id,
+        "arms": arms,
+        "arm_raised": arms != "none",
+        "leg_moved": bool(results.get("legs", False)),
+        "call_consent": results.get("call_consent", ""),
+    }
+
+
+def send_to_c2(payload: dict) -> Optional[dict]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(CONFIG["C2_URL"].rstrip("/") + "/gesture", data=body,
                                  headers={"Content-Type": "application/json; charset=utf-8"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-        print(f"[C1] 已送給 C2：{gestures} → {result.get('message') or result.get('status')}")
+        print(f"[C1] 已送給 C2：{payload} → {result.get('message') or result.get('status')}")
         return result
     except Exception as e:
         print(f"[C1] 送給 C2 失敗（C2 沒開或網路不通）：{e}")
@@ -357,7 +446,7 @@ class PoseCamera:
             from mediapipe.tasks import python as mp_python
             from mediapipe.tasks.python import vision
         except ImportError as e:
-            sys.exit(f"缺少套件：{e}\n請先執行：pip install opencv-python mediapipe")
+            sys.exit(f"缺少套件：{e}\n請先執行：python -m pip install opencv-python mediapipe")
         self.cv2, self.mp = cv2, mp
         src = int(source) if str(source).isdigit() else source
         self.cap = cv2.VideoCapture(src)
@@ -396,89 +485,102 @@ class PoseCamera:
         self.landmarker.close()
 
 
-def draw_overlay(cv2, frame, lm, det: GestureDetector, remaining: Optional[float]):
+def draw_overlay(cv2, frame, lm, det: GestureDetector, remaining: Optional[float], title: str = ""):
     if lm:
-        for i in (NOSE, L_EAR, R_EAR, L_SHOULDER, R_SHOULDER, L_WRIST, R_WRIST, L_HIP, R_HIP):
+        for i in (NOSE, L_EAR, R_EAR, L_SHOULDER, R_SHOULDER, L_WRIST, R_WRIST, L_HIP, R_HIP,
+                  L_KNEE, R_KNEE, L_ANKLE, R_ANKLE):
             p = lm.get(i)
             if p and p.visibility >= det.p["MIN_VISIBILITY"]:
                 cv2.circle(frame, (int(p.x), int(p.y)), 5, (0, 255, 0), -1)
     # cv2.putText 不支援中文，畫面上用英文
-    lines = [f"detected: {', '.join(det.detected) or '-'}"]
+    lines = [title] if title else []
+    lines.append(f"detected: {', '.join(det.detected) or '-'}")
     d = det.debug
     if "yaw" in d:
         lines.append(f"yaw {d['yaw']:+.2f} ({d['yaw_sw']})  pitch {d['pitch']:+.2f} ({d['pitch_sw']})")
-    if "raise" in d:
-        lines.append(f"hand {d['raise']:+.2f}")
+    hands = [f"{s} {d['hand_' + s]:+.2f}" for s in ("left", "right") if f"hand_{s}" in d]
+    if hands:
+        lines.append("hand " + "  ".join(hands))
+    if "leg" in d:
+        lines.append(f"leg {d['leg']:.2f}")
     if remaining is not None:
         lines.append(f"time left {remaining:.1f}s")
     for k, text in enumerate(lines):
         cv2.putText(frame, text, (10, 30 + 28 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
 
-def observe(source: str, seconds: Optional[float], show: bool = True, early_stop: bool = True,
-            accept: Optional[set] = None) -> list[str]:
-    """觀察 seconds 秒（None = 一直看到按 q），回傳辨識到的動作清單；accept 指定只算哪些動作"""
-    cam = PoseCamera(source)
+def observe(cam: PoseCamera, seconds: Optional[float], show: bool = True, purpose: str = "") -> GestureDetector:
+    """觀察 seconds 秒（None = 一直看到按 q）；有 purpose 時只顯示該題算的動作，看到完整動作就提早結束"""
     cv2 = cam.cv2
     det = GestureDetector()
+    q = QUESTIONS.get(purpose)
     start = time.monotonic()
+    while True:
+        now = time.monotonic() - start
+        if seconds is not None and now >= seconds:
+            break
+        frame, lm = cam.read()
+        if frame is None:
+            print("[C1] 影像結束")
+            break
+        for g in det.update(lm, now):
+            if q is None or g in q["accept"]:
+                print(f"[C1] {now:5.1f}s 辨識到：{GESTURE_TEXT.get(g, g)}（{g}）")
+        if show:
+            draw_overlay(cv2, frame, lm, det, None if seconds is None else seconds - now, purpose)
+            cv2.imshow("C1 gesture", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+        if q and CONFIG["EARLY_STOP"] and seconds is not None and set(det.detected) & q["stop_on"]:
+            time.sleep(0.3)
+            break
+    return det
 
-    def accepted() -> list[str]:
-        return [g for g in det.detected if accept is None or g in accept]
 
+def ask_one(cam: PoseCamera, purpose: str, seconds: float, show: bool):
+    q = QUESTIONS[purpose]
+    speak(q["prompt"])
+    det = observe(cam, seconds, show=show, purpose=purpose)
+    ans = det.answer(purpose)
+    print(f"[C1] 回應：{answer_text(purpose, ans)}")
+    return ans
+
+
+def run_check(source: str, seconds: float, show: bool = True, purposes: Optional[list[str]] = None,
+              event_id: Optional[str] = None) -> dict:
+    """依序提出問題並觀察，回傳 {purpose: 答案}；有 event_id 就把三題結果送給 C2"""
+    purposes = purposes or QUESTION_ORDER
+    cam = PoseCamera(source)
+    results: dict = {}
     try:
-        while True:
-            now = time.monotonic() - start
-            if seconds is not None and now >= seconds:
-                break
-            frame, lm = cam.read()
-            if frame is None:
-                print("[C1] 影像結束")
-                break
-            for g in det.update(lm, now):
-                note = "" if accept is None or g in accept else "（這題不算）"
-                print(f"[C1] {now:5.1f}s 辨識到：{GESTURE_TEXT.get(g, g)}（{g}）{note}")
-            if show:
-                draw_overlay(cv2, frame, lm, det, None if seconds is None else seconds - now)
-                cv2.imshow("C1 gesture", frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
-            if early_stop and seconds is not None and accepted():
-                break
+        for purpose in purposes:
+            results[purpose] = ask_one(cam, purpose, seconds, show)
     finally:
         cam.close()
         if show:
-            cv2.destroyAllWindows()
-    return accepted()
-
-
-def ask(purpose: str, source: str, seconds: float, show: bool = True,
-        event_id: Optional[str] = None) -> list[str]:
-    """提出問題 → 觀察長者動作 → （有 event_id 就）把結果送給 C2"""
-    q = QUESTIONS[purpose]
-    speak(q["prompt"])
-    print(f"[C1] 觀察 {seconds:.0f} 秒，等待：{'／'.join(GESTURE_TEXT[g] for g in sorted(q['accept']))}")
-    gestures = observe(source, seconds, show=show, early_stop=CONFIG["EARLY_STOP"], accept=q["accept"])
-    print(f"[C1] 回應：{'、'.join(GESTURE_TEXT.get(g, g) for g in gestures) or '未做出指定動作'}")
+            cam.cv2.destroyAllWindows()
+    print("\n===== 肢體確認結果 =====")
+    for purpose, ans in results.items():
+        print(f"{QUESTIONS[purpose]['prompt']} → {answer_text(purpose, ans)}")
     if event_id:
-        send_to_c2(event_id, gestures, purpose)
-    return gestures
+        send_to_c2(to_c2_payload(event_id, results))
+    return results
 
 
 # ============================================================
-# server 模式：等 A 組／Temi 叫我開始觀察
+# server 模式：語音確認「有回應」後，由 B 組／Temi 叫我開始
 # ============================================================
 busy = threading.Lock()
 
 
-def run_observation(event_id: str, purpose: str, seconds: float, show: bool):
+def run_observation(event_id: str, seconds: float, show: bool):
     with busy:
-        print(f"\n[C1] 事件 {event_id}：開始肢體確認（{purpose}）")
+        print(f"\n[C1] 事件 {event_id}：開始肢體確認")
         try:
-            ask(purpose, CONFIG["SOURCE"], seconds, show=show, event_id=event_id)
+            run_check(CONFIG["SOURCE"], seconds, show=show, event_id=event_id)
         except Exception as e:
             print(f"[C1] 觀察失敗：{e}")
-            send_to_c2(event_id, [], purpose)
+            send_to_c2(to_c2_payload(event_id, {}))
 
 
 def make_handler(show: bool):
@@ -501,14 +603,10 @@ def make_handler(show: bool):
                 if not event_id:
                     return self._reply(400, {"error": "缺少 event_id"})
                 if busy.locked():
-                    return self._reply(409, {"error": "正在觀察其他事件"})
-                purpose = data.get("purpose", "call_consent")
-                if purpose not in QUESTIONS:
-                    return self._reply(400, {"error": f"purpose 只能是 {list(QUESTIONS)}"})
+                    return self._reply(409, {"error": "正在確認其他事件"})
                 seconds = float(data.get("seconds", CONFIG["OBSERVE_SECONDS"]))
-                threading.Thread(target=run_observation, args=(event_id, purpose, seconds, show),
-                                 daemon=True).start()
-                self._reply(200, {"event_id": event_id, "message": f"開始肢體確認（{purpose}）"})
+                threading.Thread(target=run_observation, args=(event_id, seconds, show), daemon=True).start()
+                self._reply(200, {"event_id": event_id, "message": "開始肢體確認"})
             except Exception as e:
                 self._reply(400, {"error": str(e)})
 
@@ -520,7 +618,7 @@ def make_handler(show: bool):
 
 def run_server(show: bool):
     srv = ThreadingHTTPServer((CONFIG["HOST"], CONFIG["PORT"]), make_handler(show))
-    print(f"C1 肢體辨識伺服器啟動：http://{CONFIG['HOST']}:{CONFIG['PORT']}/start")
+    print(f"C1 肢體確認伺服器啟動：http://{CONFIG['HOST']}:{CONFIG['PORT']}/start")
     srv.serve_forever()
 
 
@@ -528,8 +626,9 @@ def run_server(show: bool):
 # demo：用假關鍵點測試辨識邏輯（不需攝影機）
 # ============================================================
 def fake_pose(t: float, yaw: float = 0.0, pitch: float = 0.0, hand_up: bool = False,
-              lying: bool = False) -> dict[int, Point]:
-    """產生一個假的人：yaw / pitch 是頭部偏移（以兩耳距離為單位），lying=True 代表整個人轉 90 度躺著"""
+              both_up: bool = False, leg: float = 0.0, lying: bool = False) -> dict[int, Point]:
+    """產生一個假的人：yaw / pitch 是頭部偏移（以兩耳距離為單位），leg 是右腳踝位移（像素），
+    lying=True 代表整個人轉 90 度躺著"""
     ear_d, shoulder_w = 60.0, 160.0
     pts = {  # 站姿、面向鏡頭，以 (0,0) 為肩膀中點；y 往下為正
         L_EAR: (ear_d / 2, -120), R_EAR: (-ear_d / 2, -120),
@@ -537,9 +636,13 @@ def fake_pose(t: float, yaw: float = 0.0, pitch: float = 0.0, hand_up: bool = Fa
         L_SHOULDER: (shoulder_w / 2, 0), R_SHOULDER: (-shoulder_w / 2, 0),
         L_HIP: (60, 250), R_HIP: (-60, 250),
         L_WRIST: (90, 200), R_WRIST: (-90, 200),
+        L_KNEE: (60, 400), R_KNEE: (-60, 400),
+        L_ANKLE: (60, 540), R_ANKLE: (-60 + leg, 540),
     }
-    if hand_up:
+    if hand_up or both_up:
         pts[R_WRIST] = (-110, -180)
+    if both_up:
+        pts[L_WRIST] = (110, -180)
     out = {}
     for k, (x, y) in pts.items():
         if lying:                     # 轉 90 度：頭朝畫面左邊
@@ -552,49 +655,56 @@ def run_demo():
     fps = 15
     dt = 1 / fps
 
-    def simulate(name: str, duration: float, fn) -> list[str]:
+    def simulate(duration: float, fn) -> GestureDetector:
         det = GestureDetector()
         t = 0.0
         while t < duration:
             det.update(fn(t), t)
             t += dt
-        return det.detected
+        return det
 
+    wave = lambda t, amp, hz=1.5: amp * math.sin(2 * math.pi * hz * t)
     cases = [
-        ("搖頭（站著）", [], lambda t: fake_pose(t, yaw=0.3 * math.sin(2 * math.pi * 1.5 * t)), ["shake_head"]),
-        ("點頭（站著）", [], lambda t: fake_pose(t, pitch=0.2 * math.sin(2 * math.pi * 1.5 * t)), ["nod"]),
-        ("舉手（站著）", [], lambda t: fake_pose(t, hand_up=t > 0.5), ["raise_hand"]),
-        ("搖頭（躺著）", [], lambda t: fake_pose(t, yaw=0.3 * math.sin(2 * math.pi * 1.5 * t), lying=True), ["shake_head"]),
-        ("點頭（躺著）", [], lambda t: fake_pose(t, pitch=0.2 * math.sin(2 * math.pi * 1.5 * t), lying=True), ["nod"]),
-        ("舉手（躺著）", [], lambda t: fake_pose(t, hand_up=t > 0.5, lying=True), ["raise_hand"]),
-        ("不動", [], lambda t: fake_pose(t), []),
-        ("頭微微晃動（雜訊）", [], lambda t: fake_pose(t, yaw=0.03 * math.sin(7 * t), pitch=0.02 * math.cos(5 * t)), []),
-        ("舉手一下就放下", [], lambda t: fake_pose(t, hand_up=0.5 < t < 0.8), []),
-        ("看不到人", [], lambda t: None, []),
+        ("搖頭（站著）", lambda t: fake_pose(t, yaw=wave(t, 0.3)), ["shake_head"]),
+        ("點頭（站著）", lambda t: fake_pose(t, pitch=wave(t, 0.2)), ["nod"]),
+        ("舉右手（站著）", lambda t: fake_pose(t, hand_up=t > 0.5), ["raise_hand"]),
+        ("舉雙手（站著）", lambda t: fake_pose(t, both_up=t > 0.5), ["raise_hand", "raise_both"]),
+        ("動腳（站著）", lambda t: fake_pose(t, leg=wave(t, 40, 1.0)), ["move_leg"]),
+        ("搖頭（躺著）", lambda t: fake_pose(t, yaw=wave(t, 0.3), lying=True), ["shake_head"]),
+        ("點頭（躺著）", lambda t: fake_pose(t, pitch=wave(t, 0.2), lying=True), ["nod"]),
+        ("舉雙手（躺著）", lambda t: fake_pose(t, both_up=t > 0.5, lying=True), ["raise_hand", "raise_both"]),
+        ("動腳（躺著）", lambda t: fake_pose(t, leg=wave(t, 40, 1.0), lying=True), ["move_leg"]),
+        ("不動", lambda t: fake_pose(t), []),
+        ("頭微微晃動（雜訊）", lambda t: fake_pose(t, yaw=0.03 * math.sin(7 * t), pitch=0.02 * math.cos(5 * t)), []),
+        ("腳微微晃動（雜訊）", lambda t: fake_pose(t, leg=wave(t, 5, 3.0)), []),
+        ("舉手一下就放下", lambda t: fake_pose(t, hand_up=0.5 < t < 0.8), []),
+        ("看不到人", lambda t: None, []),
     ]
     passed = 0
     print("【動作辨識】")
-    for name, _, fn, expected in cases:
-        got = simulate(name, 4.0, fn)
+    for name, fn, expected in cases:
+        got = simulate(4.0, fn).detected
         ok = got == expected
         passed += ok
         print(f"{'✅' if ok else '❌'} {name:12} → 辨識：{got or '無'}（預期：{expected or '無'}）")
 
-    # 依問題只算指定動作：例如問「要不要打電話」時舉手不算
+    # 每一題的答案：只看該題相關的動作
     question_cases = [
-        ("問打電話，長者點頭", "call_consent", lambda t: fake_pose(t, pitch=0.2 * math.sin(2 * math.pi * 1.5 * t)), ["nod"]),
-        ("問打電話，長者搖頭", "call_consent", lambda t: fake_pose(t, yaw=0.3 * math.sin(2 * math.pi * 1.5 * t)), ["shake_head"]),
-        ("問打電話，長者只舉手", "call_consent", lambda t: fake_pose(t, hand_up=t > 0.5), []),
-        ("請舉手，長者舉手", "consciousness", lambda t: fake_pose(t, hand_up=t > 0.5, lying=True), ["raise_hand"]),
-        ("請舉手，長者沒動", "consciousness", lambda t: fake_pose(t, lying=True), []),
+        ("雙手題：舉雙手", "arms", lambda t: fake_pose(t, both_up=t > 0.5), "both"),
+        ("雙手題：只舉右手", "arms", lambda t: fake_pose(t, hand_up=t > 0.5), "right"),
+        ("雙手題：沒舉手", "arms", lambda t: fake_pose(t), "none"),
+        ("動腳題：有動", "legs", lambda t: fake_pose(t, leg=wave(t, 40, 1.0), lying=True), True),
+        ("動腳題：沒動", "legs", lambda t: fake_pose(t, lying=True), False),
+        ("打電話題：點頭", "call_consent", lambda t: fake_pose(t, pitch=wave(t, 0.2)), "nod"),
+        ("打電話題：搖頭", "call_consent", lambda t: fake_pose(t, yaw=wave(t, 0.3)), "shake_head"),
+        ("打電話題：只舉手", "call_consent", lambda t: fake_pose(t, hand_up=t > 0.5), ""),
     ]
-    print("\n【依問題篩選動作】")
+    print("\n【每一題的答案】")
     for name, purpose, fn, expected in question_cases:
-        accept = QUESTIONS[purpose]["accept"]
-        got = [g for g in simulate(name, 4.0, fn) if g in accept]
+        got = simulate(4.0, fn).answer(purpose)
         ok = got == expected
         passed += ok
-        print(f"{'✅' if ok else '❌'} {name:12} → 回應：{got or '無'}（預期：{expected or '無'}）")
+        print(f"{'✅' if ok else '❌'} {name:12} → {answer_text(purpose, got)}（預期：{answer_text(purpose, expected)}）")
 
     total = len(cases) + len(question_cases)
     print(f"\n通過 {passed}/{total}")
@@ -603,13 +713,13 @@ def run_demo():
 
 # ============================================================
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="C1 肢體確認（提問＋舉手／點頭／搖頭）")
+    ap = argparse.ArgumentParser(description="C1 肢體反應確認（提問＋舉手／動腳／點頭／搖頭）")
     ap.add_argument("mode", nargs="?", default="demo", choices=["demo", "camera", "ask", "server"])
-    ap.add_argument("--purpose", default="call_consent", choices=list(QUESTIONS) + ["all"],
-                    help="ask 模式要問的問題：call_consent（要不要打電話）、consciousness（聽得到請舉手）、all（兩題都問）")
-    ap.add_argument("--event-id", help="把結果送給 C2 時使用的事件編號")
+    ap.add_argument("--purpose", default="all", choices=QUESTION_ORDER + ["all"],
+                    help="ask 模式要問哪一題：arms（舉雙手）、legs（動腳）、call_consent（要不要打電話）、all（三題，預設）")
+    ap.add_argument("--event-id", help="三題問完，把結果送給 C2 時使用的事件編號")
     ap.add_argument("--source", default=CONFIG["SOURCE"], help="攝影機編號或影片／串流網址（預設 0）")
-    ap.add_argument("--seconds", type=float, default=CONFIG["OBSERVE_SECONDS"], help="觀察秒數")
+    ap.add_argument("--seconds", type=float, default=CONFIG["OBSERVE_SECONDS"], help="每題最多觀察秒數")
     ap.add_argument("--no-window", action="store_true", help="不顯示畫面")
     ap.add_argument("--no-voice", action="store_true", help="不用電腦語音唸問題，只顯示文字")
     args = ap.parse_args()
@@ -621,23 +731,18 @@ if __name__ == "__main__":
         sys.exit(0 if run_demo() else 1)
     elif args.mode == "server":
         run_server(show=not args.no_window)
-    elif args.mode == "ask" and args.purpose == "all":
-        # 測試用：兩題依序問完。實際流程只會依語音結果問其中一題，所以這裡不送給 C2
-        if args.event_id:
-            print("[C1] --purpose all 只用來測試，不會把結果送給 C2")
-        results = {}
-        for purpose in ("consciousness", "call_consent"):
-            results[purpose] = ask(purpose, args.source, args.seconds, show=not args.no_window)
-        print("\n===== 兩題結果 =====")
-        for purpose, gestures in results.items():
-            label = "意識確認（請舉手）" if purpose == "consciousness" else "是否需要打電話（點頭／搖頭）"
-            print(f"{label}：{'、'.join(GESTURE_TEXT.get(g, g) for g in gestures) or '未做出指定動作'}")
     elif args.mode == "ask":
-        ask(args.purpose, args.source, args.seconds, show=not args.no_window, event_id=args.event_id)
-    elif args.event_id:
-        gestures = observe(args.source, args.seconds, show=not args.no_window, early_stop=CONFIG["EARLY_STOP"])
-        print(f"[C1] 觀察結果：{gestures or '無肢體回應'}")
-        send_to_c2(args.event_id, gestures)
+        purposes = QUESTION_ORDER if args.purpose == "all" else [args.purpose]
+        if args.event_id and args.purpose != "all":
+            print("[C1] 只問一題時不會送給 C2；要送請用 --purpose all")
+        run_check(args.source, args.seconds, show=not args.no_window, purposes=purposes,
+                  event_id=args.event_id if args.purpose == "all" else None)
     else:
-        print("[C1] 測試模式：對著鏡頭舉手／點頭／搖頭，按 q 結束")
-        observe(args.source, None, show=not args.no_window, early_stop=False)
+        print("[C1] 測試模式：對著鏡頭舉手／動腳／點頭／搖頭，按 q 結束")
+        cam = PoseCamera(args.source)
+        try:
+            observe(cam, None, show=not args.no_window)
+        finally:
+            cam.close()
+            if not args.no_window:
+                cam.cv2.destroyAllWindows()

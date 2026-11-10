@@ -1,23 +1,26 @@
 """
 第三階段：事件資訊整合與緊急通知系統（C2）
 
-流程：
-    A 組（跌倒時間、位置） ─┐
-    B 組（語音結果）       ─┼→ 接收資料 → 判斷狀態 → 產生摘要 → 通知緊急聯絡人 → 必要時請 Temi 撥視訊
-    C1（肢體辨識結果）     ─┘
+流程（依專題流程圖）：
+    語音互動 ─ 有語音回應 → 肢體反應確認（C1）→ 整理語音＋肢體資訊 → 傳送事件摘要給緊急聯絡人
+             │                                                      ├ 時限內按「已查看」→ 由聯絡人決定後續
+             │                                                      └ 時限內沒查看       → Temi 主動撥打聯絡人
+             └ 無語音回應 ─────────────────────────────────────────→ 直接請 Temi 撥打聯絡人（同時傳送摘要）
 
 使用方式：
-    python event_reporter.py demo      # 跑內建情境測試
-    python event_reporter.py server    # 啟動 HTTP 伺服器，讓 A / B / C1 用 POST 傳資料
+    python event_reporter.py demo      # 跑內建情境測試（約 5 秒，會示範「已查看」和「未查看」兩種結果）
+    python event_reporter.py server    # 啟動 HTTP 伺服器，讓 A / B / C1 / Temi 傳資料
 
 HTTP 介面（JSON，同一事件用同一個 event_id 串起來）：
-    POST /fall     {"event_id": "...", "fall_time": "2026-11-08T14:32:10", "location": "客廳", "confidence": 0.92}
-    POST /speech   {"event_id": "...", "text": "我腳好痛起不來", "language": "zh-TW", "llm_intent": "need_help", "llm_summary": "..."}
-    POST /gesture  {"event_id": "...", "gestures": ["raise_hand", "nod"]}
-    POST /event    三者合併成一包也可以，直接處理
-    POST /call_status  Temi 回報視訊結果 {"event_id": "...", "contact": "女兒", "status": "connected" | "no_answer"}
+    POST /fall     A 組 {"event_id": "...", "fall_time": "2026-11-08T14:32:10", "location": "客廳"}
+    POST /speech   B 組 {"event_id": "...", "responded": true, "text": "我腳好痛", "language": "zh-TW",
+                         "llm_intent": "need_help", "llm_summary": "..."}
+    POST /gesture  C1   {"event_id": "...", "arms": "both", "leg_moved": true, "call_consent": "nod"}
+    POST /event    三者合併成一包：{"fall": {...}, "speech": {...}, "gesture": {...}}
+    POST /call_status  Temi 回報通話結果 {"event_id": "...", "contact": "女兒", "status": "connected" | "no_answer"}
+    GET  /ack?event_id=...  聯絡人點摘要裡的連結，表示「已查看」
 
-需要視訊時，本程式會送指令給 Temi（TEMI_URL）：
+需要撥打時，本程式會送指令給 Temi（TEMI_URL）：
     {"action": "call_contact", "contact": "女兒", "event_id": "..."}
 沒有 Temi 時可先執行 mock_temi.py 模擬。
 
@@ -31,6 +34,7 @@ import os
 import smtplib
 import sys
 import threading
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -45,10 +49,14 @@ from typing import Optional
 # 設定（可用環境變數覆蓋）
 # ============================================================
 CONFIG = {
-    # 跌倒後等待 B、C1 結果的最長秒數，超過就用現有資料直接判斷
+    # 跌倒後等待 B、C1 結果的最長秒數，超過就用現有資料直接處理（沒收到語音視為無語音回應）
     "WAIT_TIMEOUT_SEC": int(os.getenv("WAIT_TIMEOUT_SEC", "60")),
-    # 跌倒超過幾分鐘未處理，狀態升級
+    # 傳送摘要後，等聯絡人按「已查看」的秒數；超過就請 Temi 主動撥打
+    "ACK_TIMEOUT_SEC": int(os.getenv("ACK_TIMEOUT_SEC", "120")),
+    # 跌倒超過幾分鐘，緊急程度升級
     "LONG_LIE_MINUTES": int(os.getenv("LONG_LIE_MINUTES", "5")),
+    # 摘要裡「已查看」連結的網址開頭；聯絡人手機要連得到，請改成 C2 電腦的區網 IP
+    "PUBLIC_URL": os.getenv("PUBLIC_URL", "http://127.0.0.1:8000"),
     # 緊急聯絡人
     "CONTACT_NAME": os.getenv("CONTACT_NAME", "家屬"),
     "CONTACT_EMAIL": os.getenv("CONTACT_EMAIL", ""),
@@ -60,8 +68,8 @@ CONFIG = {
     # Telegram Bot（選用）
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", ""),
-    # 遠端視訊：送「打電話」指令給 Temi，由 Temi 內建視訊通話打給聯絡人
-    #   TEMI_URL      ：Temi App 接收指令的網址（測試時是 mock_temi.py）
+    # 撥打：送「打電話」指令給 Temi，由 Temi 內建視訊通話打給聯絡人
+    #   TEMI_URL      ：Temi 接收指令的網址（測試時是 mock_temi.py）
     #   TEMI_CONTACTS ：要撥打的聯絡人（Temi 裡的名稱），用逗號分隔；第一位沒接就打下一位
     "TEMI_URL": os.getenv("TEMI_URL", "http://127.0.0.1:9000/command"),
     "TEMI_CONTACTS": [c.strip() for c in os.getenv("TEMI_CONTACTS", "女兒,兒子").split(",") if c.strip()],
@@ -75,9 +83,10 @@ CONFIG = {
 # 資料結構
 # ============================================================
 class Status(Enum):
-    EMERGENCY = "緊急"   # 立即通知 + 啟動視訊
-    WARNING = "需關注"   # 通知家屬，由家屬決定是否視訊
-    SAFE = "安全"        # 通知家屬「有跌倒但本人表示沒事」
+    """緊急程度：寫在摘要上給家屬參考，不決定要不要撥打（撥打依流程圖：無語音或未查看）"""
+    EMERGENCY = "緊急"
+    WARNING = "需關注"
+    SAFE = "安全"
 
 
 @dataclass
@@ -89,20 +98,22 @@ class FallInfo:                      # 來自 A 組
 
 @dataclass
 class SpeechInfo:                    # 來自 B 組
+    responded: bool = False          # 長者有沒有語音回應
     text: str = ""
-    language: str = ""               # zh-TW / nan-TW（台語）等
-    llm_intent: str = ""             # need_help / ok / unknown（B 組 LLM 分析結果）
+    language: str = ""               # zh-TW / nan-TW（台語）
+    llm_intent: str = ""             # need_help / ok / 空白（B 組 LLM 整理的意圖）
     llm_summary: str = ""
 
 
 @dataclass
-class GestureInfo:                   # 來自 C1
-    gestures: list[str] = field(default_factory=list)   # raise_hand / nod / shake_head
-    # C1 這次問的是什麼：
-    #   call_consent ：語音有回應後，問「需要幫你打電話嗎？」→ 點頭 / 搖頭
-    #   consciousness：語音沒回應，請長者「聽得到就舉手」→ 舉手
-    #   空字串       ：舊格式，沒有指定問題
-    purpose: str = ""
+class GestureInfo:                   # 來自 C1（只在有語音回應時做）
+    arms: str = ""                       # 「請把兩隻手都舉起來」：both / left / right / none；"" 沒做這題
+    leg_moved: Optional[bool] = None     # 「請動一動你的腳」：True 有動、False 沒動、None 沒做這題
+    call_consent: str = ""               # 「需要幫你打電話嗎？」：nod 點頭 / shake_head 搖頭 / "" 沒反應
+
+    @property
+    def arm_raised(self) -> Optional[bool]:
+        return None if not self.arms else self.arms != "none"
 
 
 @dataclass
@@ -113,12 +124,16 @@ class Incident:
     gesture: Optional[GestureInfo] = None
     processed: bool = False
 
+    @property
+    def has_voice(self) -> bool:
+        return bool(self.speech and self.speech.responded)
+
 
 @dataclass
 class Assessment:
     status: Status
     reasons: list[str]
-    need_video: bool
+    direct_call: bool                # True = 無語音回應，直接撥打
 
 
 # ============================================================
@@ -141,23 +156,41 @@ def parse_fall(d: dict) -> FallInfo:
 
 
 def parse_speech(d: dict) -> SpeechInfo:
+    text = d.get("text", "") or ""
+    intent = (d.get("llm_intent", "") or "").lower()
+    responded = d.get("responded")
+    if responded is None:            # 沒給 responded 時，有文字就當作有回應
+        responded = bool(text.strip() or intent)
     return SpeechInfo(
-        text=d.get("text", "") or "",
+        responded=responded is True,
+        text=text,
         language=d.get("language", "") or "",
-        llm_intent=(d.get("llm_intent", "") or "").lower(),
+        llm_intent=intent,
         llm_summary=d.get("llm_summary", "") or "",
     )
 
 
 def parse_gesture(d: dict) -> GestureInfo:
-    g = d.get("gestures", [])
-    if isinstance(g, str):
-        g = [g]
-    return GestureInfo(gestures=[x.lower() for x in g], purpose=(d.get("purpose", "") or "").lower())
+    arms = (d.get("arms", "") or "").lower()
+    if arms not in ("both", "left", "right", "none"):
+        arms = ""
+    if not arms and isinstance(d.get("arm_raised"), bool):     # 只給 arm_raised 時
+        arms = "both" if d["arm_raised"] else "none"
+    leg = d.get("leg_moved")
+    consent = (d.get("call_consent", "") or "").lower()
+    # 相容舊格式 {"gestures": ["raise_hand", "nod"]}
+    old = d.get("gestures")
+    if old is not None:
+        old = [old] if isinstance(old, str) else [x.lower() for x in old]
+        if not arms and "raise_hand" in old:
+            arms = "both"
+        if not consent:
+            consent = next((x for x in old if x in ("nod", "shake_head")), "")
+    return GestureInfo(arms=arms, leg_moved=leg if isinstance(leg, bool) else None, call_consent=consent)
 
 
 # ============================================================
-# 2. 判斷狀態
+# 2. 判斷緊急程度
 # ============================================================
 # 國語＋台語常見求救 / 沒事關鍵字（LLM 沒給結果時當備援）
 HELP_KEYWORDS = [
@@ -171,22 +204,10 @@ OK_KEYWORDS = [
 ]
 SEVERE_KEYWORDS = ["流血", "胸口", "喘不過", "叫救護車", "動不了", "暈"]
 
-GESTURE_TEXT = {
-    "raise_hand": "舉手（求助）",
-    "nod": "點頭（需要幫忙）",
-    "shake_head": "搖頭（不需要幫忙）",
-}
-PURPOSE_TEXT = {"call_consent": "是否需要打電話", "consciousness": "意識確認"}
-PURPOSE_GESTURE_TEXT = {
-    ("call_consent", "nod"): "點頭（需要打電話）",
-    ("call_consent", "shake_head"): "搖頭（不需要打電話）",
-    ("consciousness", "raise_hand"): "舉手（有意識）",
-}
-
 
 def analyze_speech(s: Optional[SpeechInfo]) -> str:
-    """回傳 need_help / severe / ok / none"""
-    if s is None or (not s.text.strip() and not s.llm_intent):
+    """回傳 none（無語音回應）/ severe / need_help / ok / unclear"""
+    if s is None or not s.responded:
         return "none"
     text = s.text
     if any(k in text for k in SEVERE_KEYWORDS):
@@ -195,85 +216,63 @@ def analyze_speech(s: Optional[SpeechInfo]) -> str:
         return "need_help"
     if s.llm_intent == "ok":
         return "ok"
-    # LLM 沒給明確結果 → 關鍵字備援（先判斷沒事，避免「不用」被「痛」誤判時可調整）
-    help_hit = any(k in text for k in HELP_KEYWORDS)
-    ok_hit = any(k in text for k in OK_KEYWORDS)
-    if help_hit:
+    if any(k in text for k in HELP_KEYWORDS):
         return "need_help"
-    if ok_hit:
+    if any(k in text for k in OK_KEYWORDS):
         return "ok"
     return "unclear"
-
-
-def analyze_gesture(g: Optional[GestureInfo]) -> str:
-    """回傳 need_help / ok / none（Temi 問：「你需要幫忙嗎？」）"""
-    if g is None or not g.gestures:
-        return "none"
-    if "raise_hand" in g.gestures or "nod" in g.gestures:
-        return "need_help"
-    if "shake_head" in g.gestures:
-        return "ok"
-    return "none"
-
-
-def assess_with_purpose(sp: str, g: GestureInfo, reasons: list[str]) -> Status:
-    """
-    C1 有指定問題時的緊急程度：
-      語音有回應 → 問要不要打電話：點頭 = 緊急；搖頭 = 依語音內容；沒動作 = 依語音內容
-      語音沒回應 → 請長者舉手：不論有沒有舉手都是緊急（摘要註明是否有意識）
-    """
-    if sp == "severe":
-        reasons.append("語音中出現嚴重症狀關鍵字")
-        return Status.EMERGENCY
-
-    if sp == "none" or g.purpose == "consciousness":
-        if "raise_hand" in g.gestures:
-            reasons.append("語音無回應，但能依指令舉手：有意識，可能無法說話")
-        else:
-            reasons.append("語音無回應，也未依指令舉手，可能失去意識")
-        return Status.EMERGENCY
-
-    # 語音有回應 → 問要不要打電話
-    if "nod" in g.gestures:
-        reasons.append("長者點頭，表示需要幫忙打電話")
-        return Status.EMERGENCY
-    if "shake_head" in g.gestures:
-        if sp == "ok":
-            reasons.append("長者表示沒事，並搖頭表示不需要打電話")
-            return Status.SAFE
-        reasons.append("長者搖頭表示不需要打電話，但語音提到不適")
-        return Status.WARNING
-    if sp == "need_help":
-        reasons.append("語音提到不適，且未能完成肢體指令（沒有點頭或搖頭）")
-        return Status.EMERGENCY
-    reasons.append("未能完成肢體指令（沒有點頭或搖頭），建議家屬確認")
-    return Status.WARNING
 
 
 def assess(inc: Incident, now: Optional[datetime] = None) -> Assessment:
     now = now or datetime.now()
     reasons: list[str] = []
     sp = analyze_speech(inc.speech)
-    ge = analyze_gesture(inc.gesture)
+    g = inc.gesture
 
-    # 規則依嚴重度由高到低
-    if inc.gesture and inc.gesture.purpose in PURPOSE_TEXT:
-        status = assess_with_purpose(sp, inc.gesture, reasons)
-    elif sp == "severe":
+    if sp == "none":
+        reasons.append("長者無語音回應，直接撥打聯絡人")
+        return Assessment(Status.EMERGENCY, reasons, direct_call=True)
+
+    if g is None:
+        reasons.append("未收到肢體確認結果")
+
+    # 肢體活動受限的項目
+    limits = []
+    if g:
+        if g.arms == "none":
+            limits.append("無法依指令舉手")
+        elif g.arms in ("left", "right"):
+            other = "右" if g.arms == "left" else "左"
+            limits.append(f"只能舉起{'左' if g.arms == 'left' else '右'}手，{other}手無法舉起")
+        if g.leg_moved is False:
+            limits.append("無法依指令動腳")
+
+    if sp == "severe":
         status = Status.EMERGENCY
-        reasons.append("語音中出現嚴重症狀關鍵字")
-    elif sp == "none" and ge == "none":
+        reasons.append("語音中出現嚴重症狀")
+        reasons.extend(limits)
+    elif g and g.call_consent == "nod":
         status = Status.EMERGENCY
-        reasons.append("跌倒者對 Temi 無語音也無肢體回應，可能失去意識")
-    elif sp == "need_help" and ge == "need_help":
+        reasons.append("長者點頭，表示需要幫忙打電話")
+        reasons.extend(limits)
+    elif limits and sp == "need_help":
         status = Status.EMERGENCY
-        reasons.append("語音與肢體皆表示需要幫忙")
-    elif sp == "need_help" or ge == "need_help":
+        reasons.append("語音提到不適，且" + "、".join(limits))
+    elif len(limits) >= 2:
+        status = Status.EMERGENCY
+        reasons.append("、".join(limits) + "，肢體活動明顯受限")
+    elif limits:
         status = Status.WARNING
-        reasons.append("語音或肢體其中一項表示需要幫忙")
-    elif sp == "ok" and ge in ("ok", "none") or ge == "ok" and sp in ("ok", "none"):
+        reasons.append(limits[0] + "，肢體活動可能受限")
+    elif sp == "need_help":
+        status = Status.WARNING
+        reasons.append("語音提到不適")
+    elif sp == "ok" and g and g.call_consent == "shake_head":
         status = Status.SAFE
-        reasons.append("跌倒者表示沒事")
+        reasons.append("長者表示沒事，並搖頭表示不需要打電話")
+    elif sp == "ok":
+        status = Status.SAFE if g else Status.WARNING
+        reasons.append("長者表示沒事")
     else:
         status = Status.WARNING
         reasons.append("回應不明確，建議家屬確認")
@@ -285,13 +284,13 @@ def assess(inc: Incident, now: Optional[datetime] = None) -> Assessment:
             reasons.append(f"跌倒已超過 {int(lying_min)} 分鐘")
             status = Status.EMERGENCY if status == Status.WARNING else Status.WARNING
 
-    return Assessment(status=status, reasons=reasons, need_video=(status == Status.EMERGENCY))
+    return Assessment(status, reasons, direct_call=False)
 
 
 # ============================================================
 # 3. 產生事件摘要
 # ============================================================
-def build_summary(inc: Incident, a: Assessment, call_contact: str = "") -> str:
+def build_summary(inc: Incident, a: Assessment) -> str:
     icon = {Status.EMERGENCY: "🚨", Status.WARNING: "⚠️", Status.SAFE: "ℹ️"}[a.status]
     lines = [f"{icon}【跌倒事件通知｜{a.status.value}】"]
 
@@ -301,34 +300,39 @@ def build_summary(inc: Incident, a: Assessment, call_contact: str = "") -> str:
     else:
         lines.append("時間 / 位置：未取得（A 組資料缺漏）")
 
-    if inc.speech and inc.speech.text:
-        lang = {"nan-TW": "台語", "zh-TW": "國語"}.get(inc.speech.language, inc.speech.language)
-        lines.append(f"語音回應：「{inc.speech.text}」" + (f"（{lang}）" if lang else ""))
-        if inc.speech.llm_summary:
-            lines.append(f"語音分析：{inc.speech.llm_summary}")
+    sp = inc.speech
+    if sp and sp.responded:
+        lang = {"nan-TW": "台語", "zh-TW": "國語"}.get(sp.language, sp.language)
+        lines.append(f"語音回應：「{sp.text}」" + (f"（{lang}）" if lang else "") if sp.text else "語音回應：有")
+        if sp.llm_summary:
+            lines.append(f"語音整理：{sp.llm_summary}")
     else:
         lines.append("語音回應：無")
 
     g = inc.gesture
-    if g and g.purpose in PURPOSE_TEXT:
-        result = "、".join(PURPOSE_GESTURE_TEXT.get((g.purpose, x), GESTURE_TEXT.get(x, x)) for x in g.gestures)
-        lines.append(f"肢體確認（{PURPOSE_TEXT[g.purpose]}）：{result or '未做出指定動作'}")
-    elif g and g.gestures:
-        lines.append("肢體回應：" + "、".join(GESTURE_TEXT.get(x, x) for x in g.gestures))
-    else:
-        lines.append("肢體回應：無")
+    if g:
+        arm = {"both": "雙手都能舉起", "left": "只能舉起左手", "right": "只能舉起右手",
+               "none": "無法舉手", "": "未確認"}[g.arms]
+        leg = {True: "腳能活動", False: "腳無法活動", None: "未確認"}[g.leg_moved]
+        consent = {"nod": "點頭（需要）", "shake_head": "搖頭（不需要）"}.get(g.call_consent, "未回應")
+        lines.append(f"肢體確認：手：{arm}；腳：{leg}；是否需要打電話：{consent}")
+    elif inc.has_voice:
+        lines.append("肢體確認：未取得")
 
     lines.append("判斷依據：" + "；".join(a.reasons))
-    advice = {
-        Status.EMERGENCY: "請立即確認狀況，必要時撥打 119。",
-        Status.WARNING: "請盡快聯繫長者確認狀況。",
-        Status.SAFE: "長者表示無大礙，仍建議稍後關心。",
-    }[a.status]
-    lines.append(f"建議：{advice}")
-    if call_contact:
-        lines.append(f"視訊通話：Temi 將撥打視訊給「{call_contact}」，請留意來電")
+    if not a.direct_call:
+        advice = {
+            Status.EMERGENCY: "請立即確認狀況，必要時撥打 119。",
+            Status.WARNING: "請盡快聯繫長者確認狀況。",
+            Status.SAFE: "長者表示無大礙，仍建議稍後關心。",
+        }[a.status]
+        lines.append(f"建議：{advice}")
     lines.append(f"事件編號：{inc.event_id}")
     return "\n".join(lines)
+
+
+def ack_url(event_id: str) -> str:
+    return f"{CONFIG['PUBLIC_URL'].rstrip('/')}/ack?event_id={urllib.parse.quote(event_id)}"
 
 
 # ============================================================
@@ -384,12 +388,53 @@ def notify_contacts(subject: str, body: str) -> None:
 
 
 # ============================================================
-# 5. 遠端視訊：送「打電話」指令給 Temi
+# 5. 「已查看」確認：摘要附連結，聯絡人點了就不撥打
 # ============================================================
-# Temi App 需要做的事（Android 端）：
-#   1. 開一個接收指令的介面（例如 HTTP POST /command）
-#   2. 收到 {"action": "call_contact", "contact": "女兒", "event_id": "..."} 後，
-#      從 temi SDK 的聯絡人清單找到對應的人，用 temi 內建視訊通話撥打
+# {event_id: {"acked": bool, "summary": str, "timer": Timer}}
+ACKS: dict[str, dict] = {}
+ACK_LOCK = threading.Lock()
+
+
+def wait_for_ack(event_id: str, summary: str) -> None:
+    timer = threading.Timer(CONFIG["ACK_TIMEOUT_SEC"], ack_timeout, args=[event_id])
+    timer.daemon = True
+    with ACK_LOCK:
+        ACKS[event_id] = {"acked": False, "summary": summary, "timer": timer}
+    timer.start()
+
+
+def handle_ack(event_id: str) -> str:
+    """聯絡人點了「已查看」；回傳要顯示給聯絡人的訊息"""
+    with ACK_LOCK:
+        rec = ACKS.get(event_id)
+        if rec is None:
+            return "找不到這個事件。"
+        if rec["acked"]:
+            return "已經確認過了。"
+        if rec.get("called"):
+            return "已超過確認時限，Temi 已主動撥打給聯絡人。"
+        rec["acked"] = True
+        rec["timer"].cancel()
+    print(f"[查看] 事件 {event_id}：聯絡人已查看摘要，由聯絡人決定後續處理")
+    return "已確認收到通知。請自行聯繫長者，或遠端連線 Temi 查看狀況。"
+
+
+def ack_timeout(event_id: str) -> None:
+    with ACK_LOCK:
+        rec = ACKS.get(event_id)
+        if rec is None or rec["acked"]:
+            return
+        rec["called"] = True
+    print(f"[查看] 事件 {event_id}：{CONFIG['ACK_TIMEOUT_SEC']} 秒內未查看，請 Temi 主動撥打")
+    start_calling(event_id, rec["summary"], "聯絡人未查看摘要")
+
+
+# ============================================================
+# 6. 撥打：送「打電話」指令給 Temi
+# ============================================================
+# Temi 端需要做的事（Temi App 或 RIM2，待組員確認）：
+#   1. 接收指令 {"action": "call_contact", "contact": "女兒", "event_id": "..."}
+#   2. 用 Temi 內建視訊通話撥給該聯絡人
 #   3. 通話結果回報給本程式：POST http://<C2電腦IP>:8000/call_status
 #      {"event_id": "...", "contact": "女兒", "status": "connected" | "no_answer" | "rejected"}
 
@@ -421,6 +466,15 @@ def call_contact_via_temi(event_id: str, index: int) -> str:
     return contact if ok else ""
 
 
+def start_calling(event_id: str, summary: str, reason: str) -> str:
+    CALLS[event_id] = {"index": 0, "summary": summary, "done": False}
+    called = call_contact_via_temi(event_id, 0)
+    if not called:
+        notify_contacts("⚠️ 跌倒事件：Temi 無法撥打",
+                        summary + f"\n\n‼️ {reason}，但 Temi 無法撥出，請立即自行聯繫長者或撥打 119。")
+    return called
+
+
 def handle_call_status(d: dict) -> dict:
     """Temi 回報通話結果；沒接通就改打下一位，全部沒接通就再發一次文字通知"""
     event_id = d.get("event_id", "")
@@ -443,32 +497,40 @@ def handle_call_status(d: dict) -> dict:
 
     rec["done"] = True
     notify_contacts(
-        "⚠️ 跌倒事件：Temi 視訊無人接聽",
-        rec["summary"] + "\n\n‼️ Temi 視訊通話所有聯絡人皆未接通，請立即回電或撥打 119。",
+        "⚠️ 跌倒事件：Temi 撥打無人接聽",
+        rec["summary"] + "\n\n‼️ Temi 撥打所有聯絡人皆未接通，請立即回電或撥打 119。",
     )
     return {"event_id": event_id, "message": "所有聯絡人都未接通，已再次通知"}
 
 
 # ============================================================
-# 主流程：整合 → 判斷 → 摘要 → 通知 → 視訊
+# 主流程：整合 → 判斷 → 摘要 → 通知 →（無語音：直接撥打／有語音：等「已查看」）
 # ============================================================
 def process_incident(inc: Incident) -> dict:
     a = assess(inc)
-    first_contact = CONFIG["TEMI_CONTACTS"][0] if (a.need_video and CONFIG["TEMI_CONTACTS"]) else ""
-    summary = build_summary(inc, a, first_contact)
-    # 先送文字摘要，讓家屬接電話前就知道狀況
-    notify_contacts(f"跌倒事件通知（{a.status.value}）", summary)
-    called = ""
-    if first_contact:
-        CALLS[inc.event_id] = {"index": 0, "summary": summary, "done": False}
-        called = call_contact_via_temi(inc.event_id, 0)
-        if not called:
-            notify_contacts("⚠️ 跌倒事件：Temi 無法撥打視訊",
-                            summary + "\n\n‼️ Temi 無法撥出視訊，請立即自行聯繫長者或撥打 119。")
+    summary = build_summary(inc, a)
     inc.processed = True
+    first = CONFIG["TEMI_CONTACTS"][0] if CONFIG["TEMI_CONTACTS"] else "聯絡人"
+
+    if a.direct_call:
+        notify_contacts(f"跌倒事件通知（{a.status.value}）",
+                        summary + f"\n\n📞 長者無語音回應，Temi 正在撥打給「{first}」，請留意來電。")
+        called = start_calling(inc.event_id, summary, "長者無語音回應")
+        action = "direct_call"
+    else:
+        wait_for_ack(inc.event_id, summary)
+        notify_contacts(
+            f"跌倒事件通知（{a.status.value}）",
+            summary + f"\n\n👉 請點此確認已查看：{ack_url(inc.event_id)}"
+                      f"\n若 {CONFIG['ACK_TIMEOUT_SEC']} 秒內未確認，Temi 將主動撥打給「{first}」。",
+        )
+        called = ""
+        action = "wait_ack"
+
     return {
         "event_id": inc.event_id,
         "status": a.status.name,
+        "action": action,
         "reasons": a.reasons,
         "temi_call": called,
         "summary": summary,
@@ -508,13 +570,16 @@ class IncidentAggregator:
                 return {"event_id": event_id, "message": "事件已處理"}
             if kind == "fall":
                 inc.fall = parse_fall(d)
-                # 收到跌倒後開始倒數，逾時就用現有資料判斷（例如長者完全沒回應）
-                threading.Timer(CONFIG["WAIT_TIMEOUT_SEC"], self._timeout, args=[event_id]).start()
+                # 收到跌倒後開始倒數，逾時就用現有資料處理
+                t = threading.Timer(CONFIG["WAIT_TIMEOUT_SEC"], self._timeout, args=[event_id])
+                t.daemon = True
+                t.start()
             elif kind == "speech":
                 inc.speech = parse_speech(d)
             elif kind == "gesture":
                 inc.gesture = parse_gesture(d)
-            ready = inc.fall and inc.speech and inc.gesture
+            # 無語音回應：不等肢體確認；有語音回應：等 C1 結果
+            ready = inc.fall and inc.speech and (not inc.speech.responded or inc.gesture)
         if ready:
             return self._finish(event_id)
         return {"event_id": event_id, "message": f"已收到 {kind}，等待其他資料"}
@@ -524,7 +589,7 @@ class IncidentAggregator:
             inc = self.incidents.get(event_id)
             if not inc or inc.processed:
                 return
-        print(f"[彙整] 事件 {event_id} 等待逾時，以現有資料判斷")
+        print(f"[彙整] 事件 {event_id} 等待逾時，以現有資料處理")
         self._finish(event_id)
 
     def _finish(self, event_id: str) -> dict:
@@ -537,7 +602,7 @@ class IncidentAggregator:
 
 
 # ============================================================
-# HTTP 伺服器（給 A 組、B 組、C1 呼叫）
+# HTTP 伺服器
 # ============================================================
 aggregator = IncidentAggregator()
 
@@ -551,6 +616,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):
+        url = urllib.parse.urlparse(self.path)
+        if url.path.rstrip("/") != "/ack":
+            return self._reply(404, {"error": "unknown path"})
+        event_id = urllib.parse.parse_qs(url.query).get("event_id", [""])[0]
+        msg = handle_ack(event_id)
+        page = (f"<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
+                f"<title>跌倒事件</title><body style='font-family:sans-serif;padding:24px;font-size:20px'>"
+                f"<p>{msg}</p><p style='color:#888;font-size:14px'>事件編號：{event_id}</p></body>")
+        body = page.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -560,6 +641,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._reply(200, process_payload(data))
             elif path == "/call_status":
                 self._reply(200, handle_call_status(data))
+            elif path == "/ack":
+                self._reply(200, {"message": handle_ack(data.get("event_id", ""))})
             elif path in ("/fall", "/speech", "/gesture"):
                 self._reply(200, aggregator.add(path[1:], data))
             else:
@@ -567,10 +650,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._reply(400, {"error": str(e)})
 
+    def log_message(self, *args):
+        pass  # 關掉預設的連線紀錄，畫面比較乾淨
+
 
 def run_server():
     srv = ThreadingHTTPServer((CONFIG["HOST"], CONFIG["PORT"]), Handler)
-    print(f"事件整合伺服器啟動：http://{CONFIG['HOST']}:{CONFIG['PORT']}")
+    print(f"事件整合伺服器啟動：http://{CONFIG['HOST']}:{CONFIG['PORT']}"
+          f"（「已查看」等待 {CONFIG['ACK_TIMEOUT_SEC']} 秒）")
     srv.serve_forever()
 
 
@@ -578,37 +665,39 @@ def run_server():
 # 內建測試情境
 # ============================================================
 def run_demo():
+    CONFIG["ACK_TIMEOUT_SEC"] = 3      # demo 縮短等待時間
     now = datetime.now().isoformat(timespec="seconds")
     cases = {
-        "情境1：喊痛，問打電話時點頭": {
+        "情境1：喊痛，雙手能舉、腳沒動，點頭要打電話（聯絡人有查看）": ({
             "fall": {"fall_time": now, "location": "客廳沙發旁"},
-            "speech": {"text": "我腳好痛，起不來", "language": "zh-TW", "llm_intent": "need_help",
-                       "llm_summary": "長者表示腳部疼痛、無法自行站起"},
-            "gesture": {"purpose": "call_consent", "gestures": ["nod"]},
-        },
-        "情境2：台語說沒事，問打電話時搖頭": {
+            "speech": {"responded": True, "text": "我腳好痛，起不來", "language": "zh-TW",
+                       "llm_intent": "need_help", "llm_summary": "長者表示腳部疼痛、無法自行站起"},
+            "gesture": {"arms": "both", "leg_moved": False, "call_consent": "nod"},
+        }, True),
+        "情境2：台語說沒事，手腳都能動，搖頭不用打（聯絡人沒查看）": ({
             "fall": {"fall_time": now, "location": "臥室"},
-            "speech": {"text": "無代誌啦，我家己會起來", "language": "nan-TW"},
-            "gesture": {"purpose": "call_consent", "gestures": ["shake_head"]},
-        },
-        "情境3：說腳有點痛，問打電話時搖頭": {
+            "speech": {"responded": True, "text": "無代誌啦，我家己會起來", "language": "nan-TW"},
+            "gesture": {"arms": "both", "leg_moved": True, "call_consent": "shake_head"},
+        }, False),
+        "情境3：說沒事，但只能舉右手，搖頭不用打（聯絡人有查看）": ({
             "fall": {"fall_time": now, "location": "書房"},
-            "speech": {"text": "腳有點痛", "language": "zh-TW"},
-            "gesture": {"purpose": "call_consent", "gestures": ["shake_head"]},
-        },
-        "情境4：沒說話，請舉手時有舉手": {
-            "fall": {"fall_time": now, "location": "廚房"},
-            "gesture": {"purpose": "consciousness", "gestures": ["raise_hand"]},
-        },
-        "情境5：沒說話，請舉手時沒反應": {
+            "speech": {"responded": True, "text": "我還好", "language": "zh-TW"},
+            "gesture": {"arms": "right", "leg_moved": True, "call_consent": "shake_head"},
+        }, True),
+        "情境4：無語音回應（直接撥打）": ({
             "fall": {"fall_time": now, "location": "浴室門口"},
-            "gesture": {"purpose": "consciousness", "gestures": []},
-        },
+            "speech": {"responded": False},
+        }, False),
     }
-    for name, payload in cases.items():
+    for name, (payload, will_ack) in cases.items():
         print(f"\n######## {name} ########")
         r = process_payload(payload)
-        print(f"→ 結果：{r['status']}")
+        print(f"→ 緊急程度：{r['status']}，處理方式：{r['action']}")
+        if will_ack and r["action"] == "wait_ack":
+            print(f"（模擬聯絡人點了「已查看」）→ {handle_ack(r['event_id'])}")
+    wait = CONFIG["ACK_TIMEOUT_SEC"] + 1
+    print(f"\n######## 等待 {wait} 秒，看沒查看的事件會不會撥打 ########")
+    time.sleep(wait)
 
 
 if __name__ == "__main__":
