@@ -98,6 +98,11 @@ class SpeechInfo:                    # 來自 B 組
 @dataclass
 class GestureInfo:                   # 來自 C1
     gestures: list[str] = field(default_factory=list)   # raise_hand / nod / shake_head
+    # C1 這次問的是什麼：
+    #   call_consent ：語音有回應後，問「需要幫你打電話嗎？」→ 點頭 / 搖頭
+    #   consciousness：語音沒回應，請長者「聽得到就舉手」→ 舉手
+    #   空字串       ：舊格式，沒有指定問題
+    purpose: str = ""
 
 
 @dataclass
@@ -148,7 +153,7 @@ def parse_gesture(d: dict) -> GestureInfo:
     g = d.get("gestures", [])
     if isinstance(g, str):
         g = [g]
-    return GestureInfo(gestures=[x.lower() for x in g])
+    return GestureInfo(gestures=[x.lower() for x in g], purpose=(d.get("purpose", "") or "").lower())
 
 
 # ============================================================
@@ -170,6 +175,12 @@ GESTURE_TEXT = {
     "raise_hand": "舉手（求助）",
     "nod": "點頭（需要幫忙）",
     "shake_head": "搖頭（不需要幫忙）",
+}
+PURPOSE_TEXT = {"call_consent": "是否需要打電話", "consciousness": "意識確認"}
+PURPOSE_GESTURE_TEXT = {
+    ("call_consent", "nod"): "點頭（需要打電話）",
+    ("call_consent", "shake_head"): "搖頭（不需要打電話）",
+    ("consciousness", "raise_hand"): "舉手（有意識）",
 }
 
 
@@ -205,6 +216,40 @@ def analyze_gesture(g: Optional[GestureInfo]) -> str:
     return "none"
 
 
+def assess_with_purpose(sp: str, g: GestureInfo, reasons: list[str]) -> Status:
+    """
+    C1 有指定問題時的緊急程度：
+      語音有回應 → 問要不要打電話：點頭 = 緊急；搖頭 = 依語音內容；沒動作 = 依語音內容
+      語音沒回應 → 請長者舉手：不論有沒有舉手都是緊急（摘要註明是否有意識）
+    """
+    if sp == "severe":
+        reasons.append("語音中出現嚴重症狀關鍵字")
+        return Status.EMERGENCY
+
+    if sp == "none" or g.purpose == "consciousness":
+        if "raise_hand" in g.gestures:
+            reasons.append("語音無回應，但能依指令舉手：有意識，可能無法說話")
+        else:
+            reasons.append("語音無回應，也未依指令舉手，可能失去意識")
+        return Status.EMERGENCY
+
+    # 語音有回應 → 問要不要打電話
+    if "nod" in g.gestures:
+        reasons.append("長者點頭，表示需要幫忙打電話")
+        return Status.EMERGENCY
+    if "shake_head" in g.gestures:
+        if sp == "ok":
+            reasons.append("長者表示沒事，並搖頭表示不需要打電話")
+            return Status.SAFE
+        reasons.append("長者搖頭表示不需要打電話，但語音提到不適")
+        return Status.WARNING
+    if sp == "need_help":
+        reasons.append("語音提到不適，且未能完成肢體指令（沒有點頭或搖頭）")
+        return Status.EMERGENCY
+    reasons.append("未能完成肢體指令（沒有點頭或搖頭），建議家屬確認")
+    return Status.WARNING
+
+
 def assess(inc: Incident, now: Optional[datetime] = None) -> Assessment:
     now = now or datetime.now()
     reasons: list[str] = []
@@ -212,7 +257,9 @@ def assess(inc: Incident, now: Optional[datetime] = None) -> Assessment:
     ge = analyze_gesture(inc.gesture)
 
     # 規則依嚴重度由高到低
-    if sp == "severe":
+    if inc.gesture and inc.gesture.purpose in PURPOSE_TEXT:
+        status = assess_with_purpose(sp, inc.gesture, reasons)
+    elif sp == "severe":
         status = Status.EMERGENCY
         reasons.append("語音中出現嚴重症狀關鍵字")
     elif sp == "none" and ge == "none":
@@ -262,8 +309,12 @@ def build_summary(inc: Incident, a: Assessment, call_contact: str = "") -> str:
     else:
         lines.append("語音回應：無")
 
-    if inc.gesture and inc.gesture.gestures:
-        lines.append("肢體回應：" + "、".join(GESTURE_TEXT.get(g, g) for g in inc.gesture.gestures))
+    g = inc.gesture
+    if g and g.purpose in PURPOSE_TEXT:
+        result = "、".join(PURPOSE_GESTURE_TEXT.get((g.purpose, x), GESTURE_TEXT.get(x, x)) for x in g.gestures)
+        lines.append(f"肢體確認（{PURPOSE_TEXT[g.purpose]}）：{result or '未做出指定動作'}")
+    elif g and g.gestures:
+        lines.append("肢體回應：" + "、".join(GESTURE_TEXT.get(x, x) for x in g.gestures))
     else:
         lines.append("肢體回應：無")
 
@@ -529,23 +580,29 @@ def run_server():
 def run_demo():
     now = datetime.now().isoformat(timespec="seconds")
     cases = {
-        "情境1：喊痛＋舉手": {
+        "情境1：喊痛，問打電話時點頭": {
             "fall": {"fall_time": now, "location": "客廳沙發旁"},
             "speech": {"text": "我腳好痛，起不來", "language": "zh-TW", "llm_intent": "need_help",
                        "llm_summary": "長者表示腳部疼痛、無法自行站起"},
-            "gesture": {"gestures": ["raise_hand"]},
+            "gesture": {"purpose": "call_consent", "gestures": ["nod"]},
         },
-        "情境2：台語說沒事＋搖頭": {
+        "情境2：台語說沒事，問打電話時搖頭": {
             "fall": {"fall_time": now, "location": "臥室"},
             "speech": {"text": "無代誌啦，我家己會起來", "language": "nan-TW"},
-            "gesture": {"gestures": ["shake_head"]},
+            "gesture": {"purpose": "call_consent", "gestures": ["shake_head"]},
         },
-        "情境3：完全沒回應": {
-            "fall": {"fall_time": now, "location": "浴室門口"},
+        "情境3：說腳有點痛，問打電話時搖頭": {
+            "fall": {"fall_time": now, "location": "書房"},
+            "speech": {"text": "腳有點痛", "language": "zh-TW"},
+            "gesture": {"purpose": "call_consent", "gestures": ["shake_head"]},
         },
-        "情境4：只點頭、沒說話": {
+        "情境4：沒說話，請舉手時有舉手": {
             "fall": {"fall_time": now, "location": "廚房"},
-            "gesture": {"gestures": ["nod"]},
+            "gesture": {"purpose": "consciousness", "gestures": ["raise_hand"]},
+        },
+        "情境5：沒說話，請舉手時沒反應": {
+            "fall": {"fall_time": now, "location": "浴室門口"},
+            "gesture": {"purpose": "consciousness", "gestures": []},
         },
     }
     for name, payload in cases.items():

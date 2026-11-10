@@ -19,26 +19,41 @@ C1（肢體辨識結果）     ─┘                                           
 - 先送文字摘要，再請 Temi 撥視訊，讓家屬接電話前就知道狀況。
 - 狀態由程式規則決定；B 組的 LLM 只提供語音意圖，沒有時改用國語／台語關鍵字判斷。
 
+## 肢體確認（C1）
+
+語音確認結束後，C1 依語音結果提出不同的問題，再用鏡頭辨識長者的動作：
+
+```text
+語音有回應 →「需要幫你打電話給家人嗎？需要請點頭，不需要請搖頭」→ 只看點頭／搖頭
+語音沒回應 →「如果你聽得到，請舉起你的手」                      → 只看舉手（確認意識）
+```
+
 ## 狀態判斷
 
-| 情況 | 結果 |
-|---|---|
-| 語音出現嚴重症狀（流血、胸口痛、喘不過、動不了等） | 🚨 緊急 → Temi 撥視訊 |
-| 沒有語音也沒有肢體回應 | 🚨 緊急 → Temi 撥視訊 |
-| 語音和肢體都表示需要幫忙 | 🚨 緊急 → Temi 撥視訊 |
-| 只有一項表示需要幫忙 | ⚠️ 需關注 |
-| 說沒事、搖頭 | ℹ️ 安全 |
-| 跌倒超過 5 分鐘 | 狀態升一級 |
+| 語音 | 肢體確認 | 結果 |
+|---|---|---|
+| 出現嚴重症狀（流血、胸口痛、喘不過、動不了等） | 不論 | 🚨 緊急 → Temi 撥視訊 |
+| 有回應 | 點頭（需要打電話） | 🚨 緊急 → Temi 撥視訊 |
+| 有回應、提到不適 | 搖頭（不需要打電話） | ⚠️ 需關注 → 只送文字通知 |
+| 有回應、表示沒事 | 搖頭（不需要打電話） | ℹ️ 安全 |
+| 有回應、提到不適 | 沒點頭也沒搖頭 | 🚨 緊急 → Temi 撥視訊 |
+| 有回應、沒提到不適 | 沒點頭也沒搖頭 | ⚠️ 需關注 |
+| 沒回應 | 舉手（有意識） | 🚨 緊急 → Temi 撥視訊，摘要註明「有意識，可能無法說話」 |
+| 沒回應 | 沒舉手 | 🚨 緊急 → Temi 撥視訊，摘要註明「可能失去意識」 |
+
+跌倒超過 5 分鐘：需關注升為緊急、安全升為需關注。C1 沒有傳 `purpose`（舊格式）時，沿用原本「語音與肢體是否表示需要幫忙」的規則。
 
 ## 環境需求
 
-Python 3.9 以上，只用標準函式庫，不需安裝套件。
+- C2（`event_reporter.py`、`mock_temi.py`、`send_test_event.py`）：Python 3.9 以上，只用標準函式庫，不需安裝套件。
+- C1（`gesture_recognizer.py`）：開鏡頭時需要 `pip install opencv-python mediapipe`（MediaPipe 建議 Python 3.10～3.12）；第一次執行會自動下載姿勢模型到 `models/`。`demo` 模式不需安裝套件。
 
 ## 檔案說明
 
 | 檔案 | 功能 |
 |---|---|
-| `event_reporter.py` | 主程式：接收資料、判斷狀態、產生摘要、通知聯絡人、送撥號指令給 Temi |
+| `event_reporter.py` | C2 主程式：接收資料、判斷狀態、產生摘要、通知聯絡人、送撥號指令給 Temi |
+| `gesture_recognizer.py` | C1 肢體確認：提出問題（電腦語音唸出），用鏡頭辨識舉手／點頭／搖頭，結果送給 C2 |
 | `mock_temi.py` | 假的 Temi：接收撥號指令，幾秒後回報接通或沒接 |
 | `send_test_event.py` | 模擬 A 組、B 組、C1 傳送資料 |
 
@@ -48,13 +63,20 @@ Python 3.9 以上，只用標準函式庫，不需安裝套件。
 
 | 想做的事 | 指令 |
 |---|---|
-| 跑內建的四個測試情境 | `python event_reporter.py demo` |
+| C2：跑內建的五個測試情境 | `python event_reporter.py demo` |
+| C1：測試辨識邏輯（不開鏡頭） | `python gesture_recognizer.py demo` |
+| C1：開鏡頭看辨識效果 | `python gesture_recognizer.py camera` |
+| C1：問「要不要打電話」，看點頭／搖頭 | `python gesture_recognizer.py ask` |
+| C1：問「聽得到請舉手」，看舉手 | `python gesture_recognizer.py ask --purpose consciousness` |
+| C1：問完把結果送給 C2 | `python gesture_recognizer.py ask --event-id e001` |
+| C1：等待 `/start` 指令再提問（port 8001） | `python gesture_recognizer.py server` |
 | 啟動主程式（port 8000） | `python event_reporter.py server` |
 | 啟動假 Temi，每通都接通（port 9000） | `python mock_temi.py` |
 | 假 Temi：第一位沒接、第二位接通 | `python mock_temi.py first_no_answer` |
 | 假 Temi：全部沒接 | `python mock_temi.py no_answer` |
 | 送緊急情境資料 | `python send_test_event.py` |
 | 送安全情境資料 | `python send_test_event.py safe` |
+| 送「沒說話但能舉手」情境資料 | `python send_test_event.py silent` |
 
 完整測試要開三個終端機：依序啟動主程式、假 Temi，再送測試資料。
 
@@ -66,13 +88,20 @@ Python 3.9 以上，只用標準函式庫，不需安裝套件。
 |---|---|---|
 | `/fall` | A 組 | `{"event_id": "e001", "fall_time": "2026-11-08T14:32:10", "location": "客廳"}` |
 | `/speech` | B 組 | `{"event_id": "e001", "text": "我腳好痛", "language": "zh-TW", "llm_intent": "need_help"}` |
-| `/gesture` | C1 | `{"event_id": "e001", "gestures": ["raise_hand"]}` |
+| `/gesture` | C1 | `{"event_id": "e001", "purpose": "call_consent", "gestures": ["nod"]}` |
 | `/call_status` | Temi | `{"event_id": "e001", "contact": "女兒", "status": "connected"}` |
 | `/event` | 任何人 | 三份資料合成一包：`{"fall": {...}, "speech": {...}, "gesture": {...}}` |
 
 - `language`：`zh-TW`（國語）或 `nan-TW`（台語）。
 - `llm_intent`：`need_help`、`ok` 或留空。
-- `gestures`：`raise_hand`（舉手）、`nod`（點頭）、`shake_head`（搖頭）。
+- `purpose`：`call_consent`（問要不要打電話）或 `consciousness`（請舉手確認意識）。
+- `gestures`：`raise_hand`（舉手）、`nod`（點頭）、`shake_head`（搖頭）；沒做出指定動作送空清單 `[]`。
+
+C1 server 模式的啟動指令（B 組或 Temi 在語音確認結束後呼叫）：
+
+```text
+POST http://<C1電腦IP>:8001/start  {"event_id": "e001", "purpose": "call_consent", "seconds": 10}
+```
 - `status`：`connected`（接通）、`no_answer`（沒接）、`rejected`（拒接）。
 
 C2 送給 Temi 的撥號指令：
@@ -101,7 +130,8 @@ C2 送給 Temi 的撥號指令：
 | 項目 | 狀態 |
 |---|---|
 | 接收 A 組、B 組、C1 資料 | ✅ 完成 |
-| 狀態判斷（緊急／需關注／安全） | ✅ 完成，四個情境測過 |
+| 狀態判斷（緊急／需關注／安全） | ✅ 完成，五個情境測過 |
+| C1 提問＋辨識舉手／點頭／搖頭 | ✅ 邏輯用假資料測過（15 項）；⚠️ 實際鏡頭需自行測試、調整靈敏度 |
 | 中文事件摘要 | ✅ 完成 |
 | 撥號指令、沒接改打下一位、全部沒接再次通知 | ✅ 完成，用假 Temi 測過 |
 | Email／Telegram 通知 | ⚠️ 程式已寫，尚未設定帳號實測 |
@@ -113,4 +143,6 @@ C2 送給 Temi 的撥號指令：
 
 - **Temi 怎麼撥視訊：** 透過 RIM2 API／eRoute，或在 Temi 上寫 Java App 接收指令。確定後修改 `send_to_temi()`。
 - **與主程式整合：** `fall_response/incident.py` 已有事件摘要和 `Notifier` 介面，功能和本模組重疊；之後可把通知與撥號改寫成 `Notifier` 的實作，不另外啟動伺服器。
+- **語音沒回應時的流程：** 主程式 `fall_response` 的規則是「無語音回應 → 直接撥打，不做肢體確認」；本模組依簡報改為先請長者舉手，不論有沒有舉手都會撥打，只差在摘要會註明是否有意識。需與負責主流程的組員對齊。
+- **C1 與 `fall_response/gesture_recognizer.py`：** 主程式已有一份肢體辨識模組，本資料夾的版本是獨立測試用，之後需討論要保留哪一份。
 - **event_id 由誰產生：** 建議由 A 組偵測到跌倒時產生，再傳給 B 組與 C1。
