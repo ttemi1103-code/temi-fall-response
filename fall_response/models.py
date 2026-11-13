@@ -1,7 +1,7 @@
 """各模組共用的資料結構。座標一律為像素，避免寬高比不同造成角度失真。"""
 import math
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
 # MediaPipe Pose 的 33 個關節點編號（只列出本系統用到的）
 NOSE = 0
@@ -83,7 +83,8 @@ class Pose:
 class FallEvent:
     timestamp: float  # 與 Frame.timestamp 同一時間軸
     wall_time: str  # 開始跌倒的實際時間（ISO 格式），給事件摘要使用
-    position_px: tuple[float, float]  # 最後看到的髖部位置，下一步用來判斷跌倒區域
+    position_px: Optional[tuple[float, float]]  # 最後看到的髖部位置；從頭到尾沒看到髖部時為 None
     peak_descent_speed: float  # 單位：軀幹長度／秒
     occluded: bool  # 確認期間人體曾被遮擋或離開畫面
     onset_delay_s: float = 0.0  # 從開始跌倒到系統判定跌倒經過的秒數
+    frame_size: Optional[tuple[int, int]] = None  # 畫面寬、高（像素），用來換算跌倒區域
