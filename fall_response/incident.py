@@ -43,6 +43,7 @@ class IncidentRecord:
     event: FallEvent
     observation_point: Optional[str] = None
     temi_arrived: bool = False
+    arrival_confirmed: Optional[bool] = None  # False 表示已派遣，但無法確認是否真的抵達
     voice_responded: bool = False
     voice_details: dict = field(default_factory=dict)
     body_status: Optional[BodyStatus] = None
@@ -61,10 +62,16 @@ def build_summary(record: IncidentRecord) -> dict:
         return "未取得" if value is None else (yes if value else no)
 
     details = record.voice_details
+    if not record.temi_arrived:
+        arrival = "否"
+    elif record.arrival_confirmed is False:
+        arrival = "已派遣（未確認抵達）"
+    else:
+        arrival = "是"
     return {
         "跌倒時間": record.event.wall_time,
         "觀察位置": record.observation_point or "未取得",
-        "Temi 到場": "是" if record.temi_arrived else "否",
+        "Temi 到場": arrival,
         "回應方式": "語音" if record.voice_responded else "無語音回應",
         "長者描述": details.get("transcript") or "未取得",
         "疼痛部位": details.get("pain_location") or "未取得",
@@ -79,6 +86,9 @@ class ObservationPlanner(Protocol):
 
 
 class RobotController(Protocol):
+    # 無法回報實際抵達的實作（例如 RIM2）設為 False，摘要會標示「未確認抵達」
+    confirms_arrival: bool
+
     def go_to(self, location: str, timeout_s: float) -> bool: ...
 
 
@@ -102,6 +112,8 @@ class SimulatedPlanner:
 
 
 class SimulatedRobot:
+    confirms_arrival = True
+
     def go_to(self, location: str, timeout_s: float) -> bool:
         logger.info("[模擬] Temi 前往 %s", location)
         return True
@@ -190,6 +202,8 @@ class IncidentManager:
             return self._robot.go_to(record.observation_point, self._timeouts.navigation_s)
 
         record.temi_arrived = self._run_limited(record, "navigation", go, self._timeouts.navigation_s) is True
+        if record.temi_arrived:
+            record.arrival_confirmed = getattr(self._robot, "confirms_arrival", True)
 
     def _confirm_voice(self, record: IncidentRecord, deadline: float) -> None:
         result = self._run_layer(record, self._voice_layer, deadline)

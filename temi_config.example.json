@@ -1,0 +1,11 @@
+{
+  "authsid": "RIM2 授權代碼",
+  "username": "RIM2 帳號",
+  "password": "RIM2 密碼",
+  "robot_name": null,
+  "default_location": "客廳",
+  "routes": {
+    "客廳": "跌倒應變-客廳"
+  },
+  "arrival_wait_s": 20
+}

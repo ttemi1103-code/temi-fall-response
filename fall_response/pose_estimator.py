@@ -1,4 +1,4 @@
-"""肢體辨識：用 MediaPipe Pose Landmarker 取得 33 個人體關節點。"""
+"""人體關節點辨識：用 MediaPipe Pose Landmarker 取得 33 個人體關節點。"""
 from pathlib import Path
 from typing import Optional
 

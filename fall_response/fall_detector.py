@@ -203,7 +203,7 @@ class FallDetector:
         return FallEvent(
             timestamp=timestamp,
             wall_time=(datetime.now() - timedelta(seconds=onset_delay)).isoformat(timespec="seconds"),
-            position_px=self._last_position or (0.0, 0.0),
+            position_px=self._last_position,
             peak_descent_speed=self._peak_speed,
             occluded=self._occluded,
             onset_delay_s=onset_delay,

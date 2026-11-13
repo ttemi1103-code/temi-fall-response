@@ -16,3 +16,4 @@ fall_response/logs/
 # 帳號密碼
 .env
 auth.py
+temi_config.json
