@@ -28,6 +28,7 @@ VideoSource → PoseEstimator → FallDetector ─(FallEvent)→ IncidentManager
 | `incident.py` | 應變流程、逾時保護、`build_summary()`、JSONL 紀錄，以及各介面的 `Protocol` 與模擬版本 | models |
 | `response_layers.py` | `VoiceLayer`（轉接語音組）與 `SimulatedVoiceClient` | incident |
 | `temi_rim.py` | `RimRobotController`：透過 RIM2 執行 eRoute 派遣 Temi（可試跑）；`ConfiguredPlanner`；設定檔讀取 | 只用標準函式庫（urllib） |
+| `temi_app.py` | `TemiAppController`：透過 Temi 上的 Java App（HTTP）派遣並等待抵達；App 端程式在 `temi_app/FallResponseServer.java` | 只用標準函式庫（urllib） |
 | `zones.py` | 跌倒區域 `Zone`、`ZonePlanner`（依跌倒位置選觀察點）、框選區域工具 | overlay、video_input |
 | `overlay.py` | 預覽畫面的中文文字與區域框 | cv2、Pillow |
 | `app.py` | 主迴圈 `FallMonitorApp` | fall_detector、incident |
@@ -44,7 +45,7 @@ VideoSource → PoseEstimator → FallDetector ─(FallEvent)→ IncidentManager
 | 介面（`Protocol`） | 目前使用 | 實際行為 |
 |---|---|---|
 | `ObservationPlanner.choose()` | 有 `zones.json` 時為 `ZonePlanner`（實際運作）；否則為 `SimulatedPlanner`，或 `--robot dry-run`／`rim` 時的 `ConfiguredPlanner` | 依跌倒區域選觀察點；沒有區域時用 `"home base"` 或設定檔的 `default_location` |
-| `RobotController.go_to()` | `SimulatedRobot`；`--robot dry-run`／`rim` 時為 `RimRobotController` | 模擬版只寫紀錄；`dry-run` 只查詢 RIM2 任務、不送出；`rim` 真的派遣，但尚未在實機測試 |
+| `RobotController.go_to()` | `SimulatedRobot`；`--robot dry-run`／`rim` 時為 `RimRobotController`；`--robot app` 時為 `TemiAppController` | 模擬版只寫紀錄；`dry-run` 只查詢 RIM2 任務、不送出；`rim` 透過 RIM2 派遣（實測：RIM2 接受指令但 Temi 未執行，原因待查）；`app` 透過 Java App 派遣並等待 `complete`，Java 端尚未在實機編譯測試 |
 | `VoiceClient.confirm_voice()` | `SimulatedVoiceClient` | 依 `--simulate-voice-response` 回傳固定內容 |
 | `Notifier` | `SimulatedNotifier` | 只寫紀錄，不會通知或撥打；`wait_for_ack()` 固定回傳已查看 |
 | 肢體層（`ResponseLayer`） | `SimulatedLayer("肢體")` | 視為未完成動作；肢體確認由其他組員負責，程式已移除，介面保留 |
@@ -60,6 +61,7 @@ VideoSource → PoseEstimator → FallDetector ─(FallEvent)→ IncidentManager
 - **肢體結果：** 肢體層回傳 `responded=False` 時記錄為 `BodyStatus.NOT_COMPLETED`（未能完成肢體指令）；丟出例外或逾時記錄為 `UNAVAILABLE`，兩者不可混用。
 - **`RobotController.go_to()`：** 回傳 `True` 代表 Temi 已到場或已派遣；無法回報實際抵達的實作要設 `confirms_arrival = False`，摘要會顯示「已派遣（未確認抵達）」。`ObservationPlanner.choose()` 回傳的名稱要和設定檔 `routes` 的鍵、Temi 地圖上的地點一致。
 - **RIM2：** `eroute/execute` 只代表任務送到機器人，失敗時會回 `Timeout`（code 10012）。`RimRobotController` 送出後等待 `arrival_wait_s` 秒，但 `go_to()` 一定在 `timeout_s` 內返回，否則流程會判定 Temi 無法到場，背景卻仍在派遣。`--robot rim` 必須設定 `robot_name`；`main()` 啟動時會呼叫 `prepare()` 先查好所有觀察點的任務 ID。收到 HTTP 401 時會重新登入一次再試。帳密放在根目錄的 `temi_config.json`（已列入 `.gitignore`），範本是 `temi_config.example.json`。
+- **Java App 通訊：** `POST /goto`、`GET /status`、`GET /locations`、`POST /stop`，格式見 `temi_app/README.md`。`TemiAppController.go_to()` 收到 `complete` 回傳 `True`、`abort` 丟出例外、逾時回傳 `False`，一定在 `timeout_s` 內返回。修改通訊格式時，Java 與 Python 兩邊要一起改。
 - **`Notifier.wait_for_ack()`：** 只有確定聯絡人已查看才回傳 `True`，否則流程會改為撥打。
 - **`PoseEstimator`：** 使用 VIDEO 模式，時間戳必須遞增，所以每個影像來源要用各自的實例。
 - **事件摘要：** `build_summary()` 的中文鍵名有測試依賴，修改時要一起更新測試和通知端。
@@ -89,8 +91,10 @@ python -m fall_response.temi_rim --list                        # 列出 RIM2 機
 python -m fall_response.temi_rim --check 客廳                  # 確認地點對應的 eRoute，不會移動 Temi
 python -m fall_response.main --source 0 --robot dry-run        # 試跑派遣，不會移動 Temi
 python -m fall_response.main --source 0 --robot rim            # 偵測到跌倒時真的派遣 Temi
+python -m fall_response.temi_app --url http://TemiIP:8080 --list   # 列出 Temi App 上的地點，不會移動 Temi
+python -m fall_response.main --source 0 --robot app --temi-app-url http://TemiIP:8080  # 透過 Java App 派遣
 ```
 
-`temi_rim --go` 和 `--robot rim` 會讓 Temi 真的移動，執行前要先問過使用者。RIM2 是全班共用帳號，有多台 Temi 和其他組的 eRoute，不要修改或刪除別組的任務。
+`temi_rim --go`、`temi_app --go`、`--robot rim` 和 `--robot app` 會讓 Temi 真的移動，執行前要先問過使用者。RIM2 是全班共用帳號，有多台 Temi 和其他組的 eRoute，不要修改或刪除別組的任務。
 
 測試輸出中的 `RuntimeError`、「無法連線影像來源」是測試刻意製造的故障，只要最後是 `OK` 就代表通過。

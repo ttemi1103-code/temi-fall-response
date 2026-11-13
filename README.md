@@ -159,6 +159,8 @@ python -m fall_response.main --source 0
 | `fall_response/response_layers.py` | 語音確認層（轉接語音組） |
 | `fall_response/incident.py` | 應變流程、逾時處理、事件摘要與紀錄 |
 | `fall_response/temi_rim.py` | 透過 RIM2 API 派遣 Temi |
+| `fall_response/temi_app.py` | 透過 Temi 上的 Java App 派遣 Temi，並等待抵達 |
+| `temi_app/FallResponseServer.java` | 加進 Temi App 的 Java 類別，接收派遣指令並回報導航狀態 |
 | `fall_response/zones.py` | 跌倒區域判斷、選擇觀察點、框選區域的工具 |
 | `fall_response/overlay.py` | 預覽畫面上的中文文字與區域框 |
 | `fall_response/app.py`、`main.py` | 主迴圈與命令列入口 |
@@ -207,7 +209,7 @@ python -m fall_response.zones --source 0
 2. 放開滑鼠後，回到 PowerShell 輸入區域名稱，例如 `沙發前`。
 3. 再輸入 Temi 觀察點名稱，例如 `客廳`；這個名稱要和 Temi 上儲存的地點、`temi_config.json` 的 `routes` 一致。直接按 Enter 表示與區域同名。
 4. 重複以上步驟，框出所有區域。
-5. 點一下影像視窗，按 `s` 儲存並離開；按 `z` 可復原上一個，按 `q` 不儲存直接離開。
+5. 每新增一個區域就會自動儲存。框錯時點一下影像視窗並按 `z` 移除上一個；全部框完後按 `×` 關閉影像視窗，或在 PowerShell 按 `Ctrl+C` 結束。
 
 區域會存在 `zones.json`，以畫面比例記錄，換解析度也能使用；但鏡頭移動或角度改變後要重新框選。
 
@@ -307,6 +309,26 @@ python -m fall_response.main --source 0 --robot rim
 - **共用帳號：** 這個 RIM2 帳號下有多台 Temi 和其他組的任務，不要修改或刪除別組的 eRoute。**`--robot rim` 和 `--go` 一定要填 `robot_name`**，沒填會拒絕派遣，避免派到別台 Temi；`--list`、`--check` 和試跑沒填時會暫時使用第一台。
 - **啟動時先檢查：** 使用 `dry-run` 或 `rim` 時，程式一啟動就會登入 RIM2，並確認每個觀察點都有對應任務。名稱寫錯會立刻顯示錯誤並停止，不用等到跌倒才發現。
 - **派遣失敗會直接撥打：** 例如 RIM2 連不上或 Temi 沒有回應時，會視為 Temi 無法到場，直接撥打聯絡人。
+
+## 派遣 Temi（Java App）
+
+RIM2 的備案。偵測到跌倒後，電腦透過 Wi-Fi 直接通知 Temi 上的 Java App，App 用 Temi SDK 前往觀察點，**抵達後回報**，不用固定等待。
+
+1. **App 端：** 把 `temi_app/FallResponseServer.java` 加進組員的 Temi App，步驟見 [temi_app/README.md](temi_app/README.md)。
+2. **確認連線：** 在 Temi 的「設定 → 開發者工具」找到 IP，執行（不會移動 Temi）：
+
+```powershell
+python -m fall_response.temi_app --url http://TemiIP:8080 --list
+```
+
+3. **框選定點：** 觀察點名稱要和 `--list` 列出的地點相同。
+4. **搭配跌倒偵測（Temi 會移動）：**
+
+```powershell
+python -m fall_response.main --source 手機串流網址 --robot app --temi-app-url http://TemiIP:8080
+```
+
+啟動時會先確認所有觀察點都在 Temi 上；名稱錯誤會立刻停止。電腦和 Temi 要連同一個 Wi-Fi。
 
 ## 肢體確認模組串接方式
 
