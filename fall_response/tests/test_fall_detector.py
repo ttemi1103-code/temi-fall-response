@@ -100,6 +100,20 @@ class FallScenarios(unittest.TestCase):
         self.assertEqual(len(s.events), 1)
         self.assertTrue(s.events[0].occluded)
 
+    def test_position_is_unknown_if_hips_never_seen_since_reset(self):
+        def hips_hidden(pose):
+            points = list(pose.landmarks)
+            for index in (23, 24):
+                points[index] = Landmark(points[index].x, points[index].y, 0.0)
+            return Pose(tuple(points))
+
+        s = Scenario().stand()
+        s.detector.reset()  # 上一次事件處理完後重置，舊位置不能沿用
+        s.play(0.6, lambda p: hips_hidden(make_pose(hip_y=400 + 250 * p, angle_deg=30 * p)))
+        s.play(4.0, lambda _: hips_hidden(make_pose(hip_y=650, angle_deg=30)))
+        self.assertEqual(len(s.events), 1)
+        self.assertIsNone(s.events[0].position_px)
+
     def test_struggling_delays_alert_but_never_cancels_it(self):
         s = Scenario().stand().move(0.6, 400, 650, 0, 85)
         struggle = lambda p: make_pose(hip_y=650, hip_x=300 + 60 * ((int(p * 20) % 2) * 2 - 1), angle_deg=85)

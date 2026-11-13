@@ -19,7 +19,7 @@ def make_pose(
 ) -> Pose:
     """angle_deg 為軀幹與鉛直的夾角。left_wrist、nose_offset 以身體座標表示（軀幹長度為單位）。"""
     ux, uy = math.sin(math.radians(angle_deg)), math.cos(math.radians(angle_deg))
-    vx, vy = -uy, ux  # 與 gesture_recognizer 的 v 軸方向一致
+    vx, vy = -uy, ux  # 與軀幹垂直的方向
     shoulder_x, shoulder_y = hip_x - ux * torso, hip_y - uy * torso
 
     def body(u: float, v: float) -> Landmark:
