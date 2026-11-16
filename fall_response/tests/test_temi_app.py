@@ -51,11 +51,13 @@ class FakeApp:
         self.requests.append((request.get_method(), path, body, timeout))
         if path == "/locations":
             return FakeResponse({"locations": self.available})
-        if path == "/goto":
+        if path == "/position":
+            return FakeResponse({"x": 1.5, "y": -2.0, "yaw": 0.3, "tilt": 0})
+        if path in ("/goto", "/goto_position"):
             if self.goto_error:
                 raise self.goto_error
             self.request_id = str(int(self.request_id) + 1)
-            return FakeResponse({"request_id": self.request_id, "location": body["location"]})
+            return FakeResponse({"request_id": self.request_id, "location": body.get("location", "(x, y)")})
         if path == "/status":
             status = self.statuses.pop(0) if self.statuses else "going"
             if isinstance(status, dict):
@@ -121,6 +123,23 @@ class GoTo(unittest.TestCase):
         with self.assertRaises(TemiAppError) as context:
             controller(app, clock).go_to("vr", 60)
         self.assertIn("無法連線", str(context.exception))
+
+
+class Position(unittest.TestCase):
+    def test_reads_current_position(self):
+        clock = Clock()
+        self.assertEqual(controller(FakeApp(clock), clock).position(), (1.5, -2.0))
+
+    def test_go_to_position_waits_for_arrival(self):
+        clock = Clock()
+        app = FakeApp(clock, statuses=["going", "complete"])
+        self.assertTrue(controller(app, clock).go_to_position(1.0, 2.0, 0.5, timeout_s=60))
+        self.assertEqual(app.requests[0][:3], ("POST", "/goto_position", {"x": 1.0, "y": 2.0, "yaw": 0.5}))
+
+    def test_go_to_position_abort_raises(self):
+        clock = Clock()
+        with self.assertRaises(TemiAppError):
+            controller(FakeApp(clock, statuses=["abort"]), clock).go_to_position(1.0, 2.0, 0.0, 60)
 
 
 class Prepare(unittest.TestCase):

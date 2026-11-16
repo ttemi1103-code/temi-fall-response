@@ -194,6 +194,34 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(self.run_app(self.slow_collapse(hip_x=550)).locations, [])
 
 
+SOFA_SEAT = Zone("沙發", "", (0.0, 0.0, 0.3, 1.0), floor=False)
+
+
+class NotFloorZones(unittest.TestCase):
+    def test_whole_frame_is_floor_except_marked_furniture(self):
+        from fall_response.zones import hips_on_floor
+
+        zones = [TABLE, SOFA_SEAT]
+        self.assertTrue(hips_on_floor(zones, make_pose(hip_x=500, hip_y=650), (1000, 800)), "區域外也算地面")
+        self.assertFalse(hips_on_floor(zones, make_pose(hip_x=100, hip_y=650), (1000, 800)), "沙發上不算")
+
+    def test_without_furniture_only_fall_zones_are_floor(self):
+        from fall_response.zones import hips_on_floor
+
+        self.assertFalse(hips_on_floor([TABLE], make_pose(hip_x=500, hip_y=650), (1000, 800)))
+        self.assertTrue(hips_on_floor([TABLE], make_pose(hip_x=800, hip_y=650), (1000, 800)))
+
+    def test_planner_never_sends_temi_to_furniture(self):
+        planner = ZonePlanner([SOFA_SEAT, TABLE], "home base")
+        self.assertEqual(planner.choose(event_at(100, 650)), "餐廳")
+
+    def test_round_trip(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "zones.json"
+            save_zones(path, [TABLE, SOFA_SEAT])
+            self.assertEqual(load_zones(path), [TABLE, SOFA_SEAT])
+
+
 class Display(unittest.TestCase):
     def test_monitor_marks_the_zone_the_person_is_in(self):
         from fall_response.main import make_monitor_callback
