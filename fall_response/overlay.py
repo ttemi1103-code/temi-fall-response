@@ -5,6 +5,7 @@ from typing import Optional, Sequence
 CHINESE_FONT = Path(r"C:\Windows\Fonts\msjhbd.ttc")
 ZONE_COLOR = (80, 200, 80)  # BGR
 ACTIVE_ZONE_COLOR = (0, 0, 230)
+NOT_FLOOR_COLOR = (160, 160, 160)  # 沙發、床等不是地面的區域
 
 
 def draw_texts(image, items: Sequence[tuple[str, tuple[int, int], tuple[int, int, int]]], size: int = 22) -> None:
@@ -40,7 +41,12 @@ def draw_zones(image, zones: Sequence, active: Optional[object] = None) -> None:
         left, top, right, bottom = zone.rect
         start = (int(left * width), int(top * height))
         end = (int(right * width), int(bottom * height))
-        color = ACTIVE_ZONE_COLOR if zone == active else ZONE_COLOR
+        floor = getattr(zone, "floor", True)
+        if not floor:
+            color = NOT_FLOOR_COLOR
+        else:
+            color = ACTIVE_ZONE_COLOR if zone == active else ZONE_COLOR
         cv2.rectangle(image, start, end, color, 3 if zone == active else 2)
-        labels.append((f"{zone.name} → {zone.location}", (start[0] + 6, start[1] + 4), color))
+        label = f"{zone.name} → {zone.location}" if floor else f"{zone.name}（不是地面）"
+        labels.append((label, (start[0] + 6, start[1] + 4), color))
     draw_texts(image, labels)

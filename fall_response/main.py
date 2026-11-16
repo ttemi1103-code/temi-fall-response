@@ -18,7 +18,8 @@ from .response_layers import LANGUAGES, MANDARIN, SimulatedVoiceClient, VoiceLay
 from .temi_app import TemiAppController, TemiAppError
 from .temi_rim import DEFAULT_CONFIG, ConfiguredPlanner, RimClient, RimError, RimRobotController, load_config
 from .video_input import VideoSource, parse_source
-from .zones import DEFAULT_ZONES, ZonePlanner, load_zones, locate
+from .floor_map import DEFAULT_FLOOR_MAP, NearPersonDispatch, load_floor_map
+from .zones import DEFAULT_ZONES, ZonePlanner, load_zones, locate, observation_zones
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL = BASE_DIR / "models" / "pose_landmarker_full.task"
@@ -49,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temi-config", default=str(DEFAULT_CONFIG), help="Temi 設定檔路徑（dry-run、rim 使用）")
     parser.add_argument("--temi-app-url", help="Temi Java App 的網址，例如 http://192.168.50.20:8080（app 使用）")
     parser.add_argument("--zones", default=str(DEFAULT_ZONES), help="跌倒區域設定檔，建立方式見 README")
+    parser.add_argument(
+        "--near-person",
+        action="store_true",
+        help="派 Temi 停到傷患旁（依地圖座標），到不了時改去觀察點；只能搭配 --robot app，需要先量測地板座標",
+    )
+    parser.add_argument("--floor-map", default=str(DEFAULT_FLOOR_MAP), help="地板座標設定檔（--near-person 使用）")
     return parser.parse_args()
 
 
@@ -58,11 +65,13 @@ def build_robot(args: argparse.Namespace, config) -> RimRobotController:
     )
 
 
-def build_incidents(args: argparse.Namespace, zones=(), robot=None) -> IncidentManager:
+def build_incidents(args: argparse.Namespace, zones=(), robot=None, floor_map=None) -> IncidentManager:
     """組裝事件流程。語音、肢體、通知完成後，在這裡替換掉模擬版本。
 
     robot 可傳入已在啟動時檢查過的 RimRobotController 或 TemiAppController。
+    floor_map 有值且使用 --robot app 時，改為派 Temi 停到傷患旁。
     """
+    observation = observation_zones(zones)
     voice = VoiceLayer(SimulatedVoiceClient(args.simulate_voice_response), args.language)
     body = SimulatedLayer("肢體")  # 肢體確認由其他組員負責
     planner = SimulatedPlanner()
@@ -74,12 +83,26 @@ def build_incidents(args: argparse.Namespace, zones=(), robot=None) -> IncidentM
         robot = robot or build_robot(args, config)
     elif args.robot == "app":
         robot = robot or TemiAppController(args.temi_app_url)
-        if zones:
-            fallback = zones[0].location  # 位置不明時前往第一個框選區域的觀察點
+        if observation:
+            fallback = observation[0].location  # 位置不明時前往第一個框選區域的觀察點
     robot = robot or SimulatedRobot()
-    if zones:
+    if observation:
         planner = ZonePlanner(zones, fallback)
+    if floor_map is not None and args.robot == "app":
+        # 同一個物件同時負責選位置和派遣：算出傷患旁的座標，到不了時改去上面選的觀察點
+        planner = robot = NearPersonDispatch(floor_map, robot, planner)
     return IncidentManager(planner, robot, voice, body, SimulatedNotifier(), log_path=DEFAULT_LOG)
+
+
+def load_near_person_map(args: argparse.Namespace):
+    """--near-person 的前置檢查：只能用 Java App 派遣，且地板座標要先量好。"""
+    if args.robot != "app":
+        raise ValueError("--near-person 只能搭配 --robot app，RIM2 無法依座標移動")
+    floor_map = load_floor_map(args.floor_map)
+    if floor_map is None or not floor_map.complete:
+        raise ValueError(f"地板座標尚未量好（{args.floor_map}），請先執行 python -m fall_response.floor_map")
+    floor_map.homography()  # 點排成一直線等問題在這裡就會報錯
+    return floor_map
 
 
 def monitor_lines(pose, update) -> list[str]:
@@ -196,19 +219,26 @@ def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     robot = None
+    floor_map = None
     try:
         zones = load_zones(args.zones)
+        locations = {zone.location for zone in observation_zones(zones)}
+        if args.near_person:
+            floor_map = load_near_person_map(args)
         if args.robot in ("dry-run", "rim"):
             # 先登入並查好所有觀察點的任務，名稱有誤時立刻停下，不要等到跌倒才發現無法派遣
             config = load_config(args.temi_config)
             robot = build_robot(args, config)
-            robot.prepare(sorted({zone.location for zone in zones} | {config.default_location}))
+            robot.prepare(sorted(locations | {config.default_location}))
         elif args.robot == "app":
             if not args.temi_app_url:
                 raise ValueError("使用 --robot app 時要加上 --temi-app-url，例如 --temi-app-url http://TemiIP:8080")
             # 先確認 App 連得上，所有觀察點也都存在 Temi 上
             robot = TemiAppController(args.temi_app_url)
-            robot.prepare(sorted({zone.location for zone in zones}))
+            robot.prepare(sorted(locations))
+            if floor_map is not None:
+                x, y = robot.position()  # 確認 App 是支援座標派遣的版本
+                logging.info("派到傷患旁模式：Temi 目前在 (%.2f, %.2f)，停在傷患 %.1f 公尺外", x, y, floor_map.standoff_m)
     except (RimError, TemiAppError, ValueError) as error:
         logging.error("%s", error)
         raise SystemExit(1)
@@ -221,7 +251,8 @@ def main() -> None:
     source = VideoSource(parse_source(args.source))
     try:
         callback = None if args.no_display else make_monitor_callback(zones=zones)
-        app = FallMonitorApp(estimator, FallDetector(), build_incidents(args, zones, robot), floor_zones=zones)
+        incidents = build_incidents(args, zones, robot, floor_map)
+        app = FallMonitorApp(estimator, FallDetector(), incidents, floor_zones=zones)
         app.run(source.frames(), callback)
     except KeyboardInterrupt:
         logging.info("使用者中止")

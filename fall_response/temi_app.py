@@ -5,6 +5,8 @@ App 端要加入 temi_app/FallResponseServer.java，安裝方式見 temi_app/REA
 
 列出 Temi 上的地點：python -m fall_response.temi_app --url http://TemiIP:8080 --list（不會移動）
 直接派遣測試：      python -m fall_response.temi_app --url http://TemiIP:8080 --go vr（Temi 會移動）
+依座標派遣（需要 temi_app/near_person/ 版本的 App）：
+  查 Temi 目前座標：--position（不會移動）；依座標派遣：--go-xy 1.5,2.0,0（Temi 會移動）
 """
 import argparse
 import json
@@ -70,6 +72,25 @@ class TemiAppController:
         """送出派遣後等待 Temi 回報；抵達回傳 True，時間到仍未抵達回傳 False，一定在 timeout_s 內返回。"""
         deadline = self._clock() + timeout_s
         request_id = self.dispatch(location, timeout_s)
+        return self._wait_arrival(request_id, location, deadline)
+
+    def position(self, timeout_s: float = 2.0) -> tuple[float, float]:
+        """Temi 目前的地圖座標（公尺）。需要 temi_app/near_person/ 版本的 App。"""
+        result = self._request("GET", "/position", timeout_s=timeout_s)
+        try:
+            return float(result["x"]), float(result["y"])
+        except (KeyError, TypeError, ValueError):
+            raise TemiAppError("Temi App /position 回傳的格式不正確") from None
+
+    def go_to_position(self, x: float, y: float, yaw: float, timeout_s: float) -> bool:
+        """依地圖座標派遣（yaw 為弧度），回傳規則和 go_to() 相同。需要 temi_app/near_person/ 版本的 App。"""
+        deadline = self._clock() + timeout_s
+        result = self._request("POST", "/goto_position", {"x": x, "y": y, "yaw": yaw}, timeout_s)
+        label = f"({x:.2f}, {y:.2f})"
+        logger.warning("派遣 Temi 前往座標 %s（Java App）", label)
+        return self._wait_arrival(str(result.get("request_id", "")), label, deadline)
+
+    def _wait_arrival(self, request_id: str, location: str, deadline: float) -> bool:
         last_status = None
         while True:
             remaining = deadline - self._clock()
@@ -119,6 +140,15 @@ class TemiAppController:
             raise TemiAppError(f"Temi App {path} 回傳的不是 JSON") from None
 
 
+def parse_position(text: str) -> tuple[float, float, float]:
+    """把命令列的 "x,y,yaw" 轉成數字。"""
+    try:
+        x, y, yaw = (float(value) for value in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError("格式是 x,y,yaw，例如 1.5,2.0,0") from None
+    return x, y, yaw
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="測試 Temi Java App 連線與派遣")
     parser.add_argument("--url", required=True, help="Temi App 的網址，例如 http://192.168.50.20:8080")
@@ -126,6 +156,8 @@ def main() -> None:
     group.add_argument("--list", action="store_true", help="列出 Temi 上的地點，不會移動 Temi")
     group.add_argument("--go", metavar="地點", help="派遣 Temi 並等待抵達（Temi 會移動）")
     group.add_argument("--stop", action="store_true", help="讓 Temi 停止移動")
+    group.add_argument("--position", action="store_true", help="顯示 Temi 目前的地圖座標，不會移動 Temi")
+    group.add_argument("--go-xy", metavar="x,y,yaw", type=parse_position, help="依地圖座標派遣（Temi 會移動）")
     parser.add_argument("--timeout", type=float, default=120.0, help="--go 最多等待幾秒")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -138,9 +170,15 @@ def main() -> None:
         elif args.stop:
             controller.stop()
             print("已要求 Temi 停止")
+        elif args.position:
+            x, y = controller.position()
+            print(f"Temi 目前在 x={x:.2f}, y={y:.2f}")
         else:
             started = time.monotonic()
-            arrived = controller.go_to(args.go, args.timeout)
+            if args.go_xy:
+                arrived = controller.go_to_position(*args.go_xy, args.timeout)
+            else:
+                arrived = controller.go_to(args.go, args.timeout)
             elapsed = time.monotonic() - started
             print(f"已抵達，花了 {elapsed:.1f} 秒" if arrived else f"{elapsed:.0f} 秒內沒有抵達")
     except TemiAppError as error:

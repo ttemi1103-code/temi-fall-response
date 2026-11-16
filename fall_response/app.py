@@ -7,7 +7,7 @@ from typing import Callable, Iterable, Optional
 from .fall_detector import FallDetector, FallUpdate
 from .incident import IncidentManager, IncidentRecord
 from .models import Frame, Pose
-from .zones import hips_in_zones
+from .zones import hips_on_floor
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class FallMonitorApp:
                 pose = self._estimator.estimate(frame)
                 shape = getattr(frame.image, "shape", None)
                 frame_size = (shape[1], shape[0]) if shape is not None else None
-                on_floor = hips_in_zones(self._floor_zones, pose, frame_size)
+                on_floor = hips_on_floor(self._floor_zones, pose, frame_size)
                 update = self._detector.update(pose, frame.timestamp, on_floor=on_floor)
                 if update.event is not None:
                     event = update.event

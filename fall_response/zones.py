@@ -18,11 +18,15 @@ DEFAULT_ZONES = Path(__file__).resolve().parent.parent / "zones.json"
 SETUP_WINDOW = "Fall Zones (drag: add, z: undo, s: save, q: quit)"
 
 
+NOT_FLOOR_MARK = "-"  # 框選時觀察點輸入這個，代表這裡不是地面（沙發、床）
+
+
 @dataclass(frozen=True)
 class Zone:
     name: str  # 跌倒區域，例如「沙發前」
-    location: str  # Temi 上儲存的觀察點，需和 temi_config.json 的 routes 一致
+    location: str  # Temi 上儲存的觀察點，需和 temi_config.json 的 routes 一致；不是地面時為空字串
     rect: tuple[float, float, float, float]  # 左、上、右、下，畫面比例 0～1
+    floor: bool = True  # False 代表沙發、床等可以躺的地方，在這裡躺著不算倒在地上
 
     def distance(self, x: float, y: float) -> float:
         left, top, right, bottom = self.rect
@@ -49,19 +53,23 @@ def load_zones(path: Union[str, Path] = DEFAULT_ZONES) -> list[Zone]:
             left, top, right, bottom = rect
             if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
                 raise ValueError(f"區域「{item['name']}」的範圍不正確")
-            zones.append(Zone(item["name"], item.get("location") or item["name"], rect))
+            if item.get("floor", True):
+                zones.append(Zone(item["name"], item.get("location") or item["name"], rect))
+            else:
+                zones.append(Zone(item["name"], "", rect, floor=False))
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"區域設定檔格式錯誤：{path}（{error}）") from None
     return zones
 
 
 def save_zones(path: Union[str, Path], zones: Sequence[Zone]) -> None:
-    data = {
-        "zones": [
-            {"name": zone.name, "location": zone.location, "rect": [round(value, 4) for value in zone.rect]}
-            for zone in zones
-        ]
-    }
+    items = []
+    for zone in zones:
+        item = {"name": zone.name, "location": zone.location, "rect": [round(value, 4) for value in zone.rect]}
+        if not zone.floor:
+            item = {"name": zone.name, "floor": False, "rect": item["rect"]}
+        items.append(item)
+    data = {"zones": items}
     Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -75,8 +83,17 @@ def locate(zones: Sequence[Zone], x: float, y: float) -> Optional[tuple[Zone, bo
     return min(zones, key=lambda zone: zone.distance(x, y)), False
 
 
-def hips_in_zones(zones: Sequence[Zone], pose, frame_size: Optional[tuple[int, int]]) -> bool:
-    """髖部是否在任何一個框選區域內，用來判斷人是不是倒在地上（而不是躺在沙發上）。"""
+def observation_zones(zones: Sequence[Zone]) -> list[Zone]:
+    """有對應 Temi 觀察點的跌倒區域（排除沙發、床等不是地面的區域）。"""
+    return [zone for zone in zones if zone.floor]
+
+
+def hips_on_floor(zones: Sequence[Zone], pose, frame_size: Optional[tuple[int, int]]) -> bool:
+    """人是不是在地面上，用來判斷「在地上停留過久」。
+
+    有框選「不是地面」的區域時：整個畫面都算地面，只排除沙發、床等區域。
+    沒有時：只有框選的跌倒區域算地面。
+    """
     from .models import LEFT_HIP, RIGHT_HIP
 
     if not zones or pose is None or not frame_size:
@@ -85,14 +102,18 @@ def hips_in_zones(zones: Sequence[Zone], pose, frame_size: Optional[tuple[int, i
         return False
     x, y = pose.hip_mid
     width, height = frame_size
-    return any(zone.distance(x / width, y / height) == 0.0 for zone in zones)
+    u, v = x / width, y / height
+    not_floor = [zone for zone in zones if not zone.floor]
+    if not_floor:
+        return not any(zone.distance(u, v) == 0.0 for zone in not_floor)
+    return any(zone.distance(u, v) == 0.0 for zone in zones)
 
 
 class ZonePlanner:
     """實作 incident.ObservationPlanner。"""
 
     def __init__(self, zones: Sequence[Zone], fallback: str):
-        self._zones = list(zones)
+        self._zones = observation_zones(zones)
         self._fallback = fallback
 
     def choose(self, event) -> str:
@@ -161,15 +182,22 @@ def setup(source: str, path: Path) -> None:
                 (x1, y1), (x2, y2) = drag["done"]
                 drag["done"] = None
                 if abs(x2 - x1) > 10 and abs(y2 - y1) > 10:
-                    name = input("跌倒區域名稱（例如 沙發前）：").strip()
-                    location = input("Temi 觀察點名稱（按 Enter 表示與區域同名）：").strip() or name
+                    name = input("區域名稱（例如 沙發前）：").strip()
+                    location = input(
+                        f"Temi 觀察點名稱（按 Enter 表示與區域同名；輸入 {NOT_FLOOR_MARK} 表示這裡不是地面，例如沙發、床）："
+                    ).strip() or name
                     if name:
                         rect = (min(x1, x2) / width, min(y1, y2) / height, max(x1, x2) / width, max(y1, y2) / height)
                         rect = tuple(min(max(value, 0.0), 1.0) for value in rect)
-                        zones.append(Zone(name, location, rect))
+                        if location == NOT_FLOOR_MARK:
+                            zones.append(Zone(name, "", rect, floor=False))
+                            target = "不是地面"
+                        else:
+                            zones.append(Zone(name, location, rect))
+                            target = location
                         # 立刻存檔：輸入法或視窗焦點常讓按鍵收不到，不能只靠按 s 儲存
                         save_zones(path, zones)
-                        print(f"已新增並儲存：{name} → {location}（共 {len(zones)} 個區域）")
+                        print(f"已新增並儲存：{name} → {target}（共 {len(zones)} 個區域）")
             if key == ord("z") and zones:
                 removed = zones.pop()
                 save_zones(path, zones)
