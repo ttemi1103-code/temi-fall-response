@@ -4,7 +4,7 @@ Temi 跌倒監測與應變系統，人因工程專題，8 人共同開發。安�
 
 ## 專案目標與架構
 
-固定鏡頭偵測長者跌倒後，安排 Temi 到場，依序做語音、肢體確認，再通知緊急聯絡人。偵測與流程控制都在電腦上以 Python 執行；Temi 端（Java／Android）與語音模組由其他組員負責，透過介面串接。
+固定鏡頭偵測長者跌倒後，安排 Temi 到場，依序做語音、肢體確認，再通知緊急聯絡人。偵測與流程控制都在電腦上以 Python 執行；Temi 端程式（Java／Android）在 `temi_app/`，Android 開發環境架在組員的電腦上；語音模組由其他組負責，透過介面串接。
 
 ```text
 VideoSource → PoseEstimator → FallDetector ─(FallEvent)→ IncidentManager（背景執行緒）
@@ -50,7 +50,7 @@ VideoSource → PoseEstimator → FallDetector ─(FallEvent)→ IncidentManager
 | `Notifier` | `SimulatedNotifier` | 只寫紀錄，不會通知或撥打；`wait_for_ack()` 固定回傳已查看 |
 | 肢體層（`ResponseLayer`） | `SimulatedLayer("肢體")` | 視為未完成動作；肢體確認由其他組員負責，程式已移除，介面保留 |
 
-**尚未實作：** 依現場遮擋自動評估最佳觀察點（目前是人工框選區域對應觀察點）、Temi 抵達確認（RIM2 只回報任務已送出）、肢體確認、語音辨識（含台語）、LLM、實際通知與撥號、多人追蹤。已知會漏報很慢的癱倒與跌坐，見 `tests/test_fall_detector.py` 的 `KnownLimits`。
+**尚未實作：** 依現場遮擋自動評估最佳觀察點（目前是人工框選區域對應觀察點）、Temi 抵達確認（RIM2 只回報任務已送出）、肢體確認、語音辨識（含台語）、LLM、實際通知與撥號、多人追蹤。已知會漏報跌坐，以及框選區域外很慢的癱倒，見 `tests/test_fall_detector.py` 的 `KnownLimits`；區域內的慢慢癱倒由「在地上停留過久」（`FallConfig.long_down_seconds`，預設 30 秒）判定，見 `LongTimeOnFloor`。
 
 ## 介面與串接注意事項
 
@@ -61,11 +61,12 @@ VideoSource → PoseEstimator → FallDetector ─(FallEvent)→ IncidentManager
 - **肢體結果：** 肢體層回傳 `responded=False` 時記錄為 `BodyStatus.NOT_COMPLETED`（未能完成肢體指令）；丟出例外或逾時記錄為 `UNAVAILABLE`，兩者不可混用。
 - **`RobotController.go_to()`：** 回傳 `True` 代表 Temi 已到場或已派遣；無法回報實際抵達的實作要設 `confirms_arrival = False`，摘要會顯示「已派遣（未確認抵達）」。`ObservationPlanner.choose()` 回傳的名稱要和設定檔 `routes` 的鍵、Temi 地圖上的地點一致。
 - **RIM2：** `eroute/execute` 只代表任務送到機器人，失敗時會回 `Timeout`（code 10012）。`RimRobotController` 送出後等待 `arrival_wait_s` 秒，但 `go_to()` 一定在 `timeout_s` 內返回，否則流程會判定 Temi 無法到場，背景卻仍在派遣。`--robot rim` 必須設定 `robot_name`；`main()` 啟動時會呼叫 `prepare()` 先查好所有觀察點的任務 ID。收到 HTTP 401 時會重新登入一次再試。帳密放在根目錄的 `temi_config.json`（已列入 `.gitignore`），範本是 `temi_config.example.json`。
-- **Java App 通訊：** `POST /goto`、`GET /status`、`GET /locations`、`POST /stop`，格式見 `temi_app/README.md`。`TemiAppController.go_to()` 收到 `complete` 回傳 `True`、`abort` 丟出例外、逾時回傳 `False`，一定在 `timeout_s` 內返回。修改通訊格式時，Java 與 Python 兩邊要一起改。
+- **Java App 通訊：** `POST /goto`、`GET /status`、`GET /locations`、`POST /stop`，格式見 `temi_app/README.md`。`MainActivity` 在 `onRobotReady(true)` 後啟動 `FallResponseServer`。`TemiAppController.go_to()` 收到 `complete` 回傳 `True`、`abort` 丟出例外、逾時回傳 `False`，一定在 `timeout_s` 內返回。修改通訊格式時，Java 與 Python 兩邊要一起改。
 - **`Notifier.wait_for_ack()`：** 只有確定聯絡人已查看才回傳 `True`，否則流程會改為撥打。
 - **`PoseEstimator`：** 使用 VIDEO 模式，時間戳必須遞增，所以每個影像來源要用各自的實例。
 - **事件摘要：** `build_summary()` 的中文鍵名有測試依賴，修改時要一起更新測試和通知端。
-- **畫面門檻文字：** `main.py` 的 `monitor_lines()` 把門檻寫死在字串裡（例如 `fall >= 1.50`），修改 `FallConfig` 時要一起更新。
+- **畫面門檻文字：** `main.py` 的 `monitor_lines()` 和 `make_monitor_callback()` 把門檻寫死在字串裡（例如 `fall >= 1.50`、`fall >= 30`），修改 `FallConfig` 時要一起更新。
+- **地面區域：** `FallDetector.update(pose, timestamp, on_floor)` 的 `on_floor` 由 `FallMonitorApp` 依 `floor_zones`（即 `zones.json` 的區域）和 `zones.hips_in_zones()` 計算；沒有傳入區域時永遠是 `False`，「在地上停留過久」不會觸發。任何事件送出後，要先看到人站直才會重新計時，這個狀態不會被 `reset()` 清掉。
 - **隱私：** 系統不儲存影像。`fall_response/logs/`、模型檔（`*.task`）和影片都已列在 `.gitignore`，不要上傳。
 
 ## 協作規範

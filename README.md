@@ -102,7 +102,7 @@ python -m fall_response.main --source 0
 2. 快速倒到防護墊上，並請人在旁邊注意安全。
 3. 躺著不動約 3 秒。
 
-畫面下方會先出現橘色「疑似摔倒，確認中」，判定後變成紅色「偵測到摔倒」，並停留 5 秒。
+畫面下方會先出現橘色「偵測中……」，判定後變成紅色「疑似跌倒，派遣 Temi 確認」，並停留 5 秒。用「疑似」是因為鏡頭只負責初步判斷，要等 Temi 到場二次確認。
 
 ### 其他常用指令
 
@@ -126,6 +126,7 @@ python -m fall_response.main --source 0
 | `ratio` | 身體外框的寬高比，只拍到上半身時不會用來判斷 |
 | `peak descent` | 最近 5 秒的最高下降速度 |
 | `FPS` | 每秒處理的畫面張數，太低時較難抓到快速摔倒 |
+| `on floor` | 在框選的跌倒區域內已倒地幾秒，達 30 秒就判定（只在區域內倒地時出現） |
 
 每次判定跌倒的結果會寫入 `fall_response/logs/incidents.jsonl`，不會儲存影像。
 
@@ -138,13 +139,16 @@ python -m fall_response.main --source 0
 - **快速下降：** 平均下降速度達每秒 1.5 個軀幹長；或離開站姿 2 秒內就倒地，且髖部至少低 0.6 個軀幹長。
 - **倒地姿勢：** 軀幹傾斜至少 55 度，或寬高比至少 1.3。
 - **確認：** 維持倒地 3 秒且幾乎不動就判定。如果一直在動會延後，但最多 8 秒就會判定。中途站起來則取消。
+- **在地上停留過久：** 長者常是慢慢癱倒，沒有快速下降。只要髖部在框選的跌倒區域內、維持倒地姿勢 30 秒，就判定為疑似跌倒。站起來或離開區域會重新計時；短暫被遮擋不會。判定後要先看到人站起來，才會再次計時，避免同一次倒地重複警報。只看框選區域，是為了不把躺沙發、躺床當成跌倒，所以框選時不要框到沙發和床。
+
+下降速度門檻沒有為長者調低：調低後坐下、彎腰也容易誤報，慢慢倒下的情況改由「在地上停留過久」處理。
 
 所有門檻都在 `fall_response/fall_detector.py` 的 `FallConfig`，目前都是起始值，尚未用正式實驗校正。
 
 ### 已知限制
 
-- 很慢的癱倒，以及跌坐（軀幹仍直立）目前會漏報。
-- 在地上伸展等持續動作，超過 8 秒可能誤報；躺在沙發和倒在地上也還無法區分。
+- 跌坐（軀幹仍直立）目前會漏報；很慢的癱倒只有在框選區域內才偵測得到，且要等 30 秒。
+- 在地上伸展等持續動作，超過 8 秒可能誤報；在框選區域內躺著休息超過 30 秒也會誤報。
 - 目前一次只追蹤一個人，測試時建議只讓一人入鏡。
 - 跌倒區域依畫面上的髖部位置判斷，鏡頭移動後要重新框選；遮擋時使用最後看到的位置。
 - 尚未統計實際的誤報率和漏報率。
@@ -160,7 +164,7 @@ python -m fall_response.main --source 0
 | `fall_response/incident.py` | 應變流程、逾時處理、事件摘要與紀錄 |
 | `fall_response/temi_rim.py` | 透過 RIM2 API 派遣 Temi |
 | `fall_response/temi_app.py` | 透過 Temi 上的 Java App 派遣 Temi，並等待抵達 |
-| `temi_app/FallResponseServer.java` | 加進 Temi App 的 Java 類別，接收派遣指令並回報導航狀態 |
+| `temi_app/` | Temi 上的 Java App：`FallResponseServer` 接收派遣指令並回報導航狀態，`MainActivity` 在 Temi 準備好後啟動服務 |
 | `fall_response/zones.py` | 跌倒區域判斷、選擇觀察點、框選區域的工具 |
 | `fall_response/overlay.py` | 預覽畫面上的中文文字與區域框 |
 | `fall_response/app.py`、`main.py` | 主迴圈與命令列入口 |
@@ -314,7 +318,7 @@ python -m fall_response.main --source 0 --robot rim
 
 RIM2 的備案。偵測到跌倒後，電腦透過 Wi-Fi 直接通知 Temi 上的 Java App，App 用 Temi SDK 前往觀察點，**抵達後回報**，不用固定等待。
 
-1. **App 端：** 把 `temi_app/FallResponseServer.java` 加進組員的 Temi App，步驟見 [temi_app/README.md](temi_app/README.md)。
+1. **App 端：** 把 `temi_app/` 的 2 個 `.java` 檔加進 Android Studio 專案並安裝到 Temi，步驟和實驗室測試順序見 [temi_app/README.md](temi_app/README.md)。
 2. **確認連線：** 在 Temi 的「設定 → 開發者工具」找到 IP，執行（不會移動 Temi）：
 
 ```powershell
