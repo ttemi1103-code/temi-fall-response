@@ -75,6 +75,19 @@ def locate(zones: Sequence[Zone], x: float, y: float) -> Optional[tuple[Zone, bo
     return min(zones, key=lambda zone: zone.distance(x, y)), False
 
 
+def hips_in_zones(zones: Sequence[Zone], pose, frame_size: Optional[tuple[int, int]]) -> bool:
+    """髖部是否在任何一個框選區域內，用來判斷人是不是倒在地上（而不是躺在沙發上）。"""
+    from .models import LEFT_HIP, RIGHT_HIP
+
+    if not zones or pose is None or not frame_size:
+        return False
+    if not (pose.visible(LEFT_HIP) and pose.visible(RIGHT_HIP)):
+        return False
+    x, y = pose.hip_mid
+    width, height = frame_size
+    return any(zone.distance(x / width, y / height) == 0.0 for zone in zones)
+
+
 class ZonePlanner:
     """實作 incident.ObservationPlanner。"""
 

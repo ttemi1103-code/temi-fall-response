@@ -7,6 +7,7 @@ from typing import Callable, Iterable, Optional
 from .fall_detector import FallDetector, FallUpdate
 from .incident import IncidentManager, IncidentRecord
 from .models import Frame, Pose
+from .zones import hips_in_zones
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +17,12 @@ MonitorCallback = Callable[[Frame, Optional[Pose], FallUpdate], bool]
 class FallMonitorApp:
     """事件處理放在背景執行緒，Temi 移動與對話期間影像仍持續處理。"""
 
-    def __init__(self, estimator, detector: FallDetector, incidents: IncidentManager):
+    def __init__(self, estimator, detector: FallDetector, incidents: IncidentManager, floor_zones=()):
+        """floor_zones：框選的跌倒區域，人在區域內倒地太久也會判定為疑似跌倒。"""
         self._estimator = estimator
         self._detector = detector
         self._incidents = incidents
+        self._floor_zones = tuple(floor_zones)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="incident")
         self._active: Optional[Future] = None
         self.records: list[IncidentRecord] = []
@@ -29,15 +32,17 @@ class FallMonitorApp:
         try:
             for frame in frames:
                 pose = self._estimator.estimate(frame)
-                update = self._detector.update(pose, frame.timestamp)
+                shape = getattr(frame.image, "shape", None)
+                frame_size = (shape[1], shape[0]) if shape is not None else None
+                on_floor = hips_in_zones(self._floor_zones, pose, frame_size)
+                update = self._detector.update(pose, frame.timestamp, on_floor=on_floor)
                 if update.event is not None:
                     event = update.event
-                    shape = getattr(frame.image, "shape", None)
-                    if shape is not None:
+                    if frame_size is not None:
                         # 偵測器只看得到關節點，畫面大小由這裡補上，才能換算跌倒區域
-                        event = replace(event, frame_size=(shape[1], shape[0]))
+                        event = replace(event, frame_size=frame_size)
                     position = tuple(round(v) for v in event.position_px) if event.position_px else "未知"
-                    logger.warning("偵測到跌倒：位置=%s 遮擋=%s", position, event.occluded)
+                    logger.warning("疑似跌倒：位置=%s 遮擋=%s", position, event.occluded)
                     self._active = self._executor.submit(self._incidents.handle, event)
                 self._collect_finished()
                 if on_frame is not None and on_frame(frame, pose, update) is False:

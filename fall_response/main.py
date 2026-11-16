@@ -25,8 +25,9 @@ DEFAULT_MODEL = BASE_DIR / "models" / "pose_landmarker_full.task"
 DEFAULT_LOG = BASE_DIR / "logs" / "incidents.jsonl"
 WINDOW_TITLE = "Temi Fall Response (q to quit)"
 # 顏色為 BGR；最後一項是找不到中文字型時改顯示的英文
-FALL_BANNER = ("偵測到摔倒", (0, 0, 220), "FALL DETECTED")
-CONFIRM_BANNER = ("疑似摔倒，確認中", (0, 140, 230), "CONFIRMING")
+# 鏡頭只能判斷「疑似」跌倒，要等 Temi 到場二次確認
+FALL_BANNER = ("疑似跌倒，派遣 Temi 確認", (0, 0, 220), "SUSPECTED FALL")
+CONFIRM_BANNER = ("偵測中……", (0, 140, 230), "CHECKING")
 
 SKELETON = [(11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (11, 23), (12, 24),
             (23, 24), (23, 25), (25, 27), (24, 26), (26, 28)]
@@ -132,6 +133,8 @@ def make_monitor_callback(show=None, alert_seconds: float = 5.0, peak_seconds: f
         lines.append(f"FPS: {fps:.0f}")
         if update.moving:
             lines.append("moving: waiting until still")
+        if update.floor_down_s > 0:
+            lines.append(f"on floor: {update.floor_down_s:.0f}s (fall >= 30)")
 
         banner = None
         if frame.timestamp < alert_until:
@@ -218,7 +221,7 @@ def main() -> None:
     source = VideoSource(parse_source(args.source))
     try:
         callback = None if args.no_display else make_monitor_callback(zones=zones)
-        app = FallMonitorApp(estimator, FallDetector(), build_incidents(args, zones, robot))
+        app = FallMonitorApp(estimator, FallDetector(), build_incidents(args, zones, robot), floor_zones=zones)
         app.run(source.frames(), callback)
     except KeyboardInterrupt:
         logging.info("使用者中止")
