@@ -29,7 +29,8 @@ VideoSource → PoseEstimator → FallDetector ─(FallEvent)→ IncidentManager
 | `response_layers.py` | `VoiceLayer`（轉接語音組）與 `SimulatedVoiceClient` | incident |
 | `temi_rim.py` | `RimRobotController`：透過 RIM2 執行 eRoute 派遣 Temi（可試跑）；`ConfiguredPlanner`；設定檔讀取 | 只用標準函式庫（urllib） |
 | `temi_app.py` | `TemiAppController`：透過 Temi 上的 Java App（HTTP）派遣並等待抵達；App 端程式在 `temi_app/FallResponseServer.java` | 只用標準函式庫（urllib） |
-| `zones.py` | 跌倒區域 `Zone`、`ZonePlanner`（依跌倒位置選觀察點）、框選區域工具 | overlay、video_input |
+| `zones.py` | 跌倒區域 `Zone`（`floor=False` 為沙發、床等不是地面的區域）、`ZonePlanner`（依跌倒位置選觀察點）、框選區域工具 | overlay、video_input |
+| `floor_map.py` | 未來功能：`Homography`（畫面比例 → 地圖座標）、`standoff_target()`、`NearPersonDispatch`（派到傷患旁，失敗改去觀察點）、量測地板座標工具；Java 端在 `temi_app/near_person/` | temi_app、zones（量測工具才用到） |
 | `overlay.py` | 預覽畫面的中文文字與區域框 | cv2、Pillow |
 | `app.py` | 主迴圈 `FallMonitorApp` | fall_detector、incident |
 | `main.py` | 命令列入口、`build_incidents()` 組裝各模組、畫面顯示 | 以上全部、Pillow |
@@ -50,7 +51,9 @@ VideoSource → PoseEstimator → FallDetector ─(FallEvent)→ IncidentManager
 | `Notifier` | `SimulatedNotifier` | 只寫紀錄，不會通知或撥打；`wait_for_ack()` 固定回傳已查看 |
 | 肢體層（`ResponseLayer`） | `SimulatedLayer("肢體")` | 視為未完成動作；肢體確認由其他組員負責，程式已移除，介面保留 |
 
-**尚未實作：** 依現場遮擋自動評估最佳觀察點（目前是人工框選區域對應觀察點）、Temi 抵達確認（RIM2 只回報任務已送出）、肢體確認、語音辨識（含台語）、LLM、實際通知與撥號、多人追蹤。已知會漏報跌坐，以及框選區域外很慢的癱倒，見 `tests/test_fall_detector.py` 的 `KnownLimits`；區域內的慢慢癱倒由「在地上停留過久」（`FallConfig.long_down_seconds`，預設 30 秒）判定，見 `LongTimeOnFloor`。
+**已寫好、尚未實測：** `--near-person`（`floor_map.py`＋`temi_app/near_person/FallResponseServer.java`）派 Temi 停到傷患旁；只用合成資料測過，Java 未編譯。
+
+**尚未實作：** 依現場遮擋自動評估最佳觀察點（目前是人工框選區域對應觀察點，或 `--near-person` 停在傷患旁固定距離）、Temi 抵達確認（RIM2 只回報任務已送出）、肢體確認、語音辨識（含台語）、LLM、實際通知與撥號、多人追蹤。已知會漏報跌坐，以及框選區域外很慢的癱倒，見 `tests/test_fall_detector.py` 的 `KnownLimits`；區域內的慢慢癱倒由「在地上停留過久」（`FallConfig.long_down_seconds`，預設 30 秒）判定，見 `LongTimeOnFloor`。
 
 ## 介面與串接注意事項
 
@@ -66,7 +69,8 @@ VideoSource → PoseEstimator → FallDetector ─(FallEvent)→ IncidentManager
 - **`PoseEstimator`：** 使用 VIDEO 模式，時間戳必須遞增，所以每個影像來源要用各自的實例。
 - **事件摘要：** `build_summary()` 的中文鍵名有測試依賴，修改時要一起更新測試和通知端。
 - **畫面門檻文字：** `main.py` 的 `monitor_lines()` 和 `make_monitor_callback()` 把門檻寫死在字串裡（例如 `fall >= 1.50`、`fall >= 30`），修改 `FallConfig` 時要一起更新。
-- **地面區域：** `FallDetector.update(pose, timestamp, on_floor)` 的 `on_floor` 由 `FallMonitorApp` 依 `floor_zones`（即 `zones.json` 的區域）和 `zones.hips_in_zones()` 計算；沒有傳入區域時永遠是 `False`，「在地上停留過久」不會觸發。任何事件送出後，要先看到人站直才會重新計時，這個狀態不會被 `reset()` 清掉。
+- **地面區域：** `FallDetector.update(pose, timestamp, on_floor)` 的 `on_floor` 由 `FallMonitorApp` 依 `floor_zones`（即 `zones.json` 的區域）和 `zones.hips_on_floor()` 計算：有 `floor=False` 的區域時整個畫面都算地面、只排除這些區域，否則只有跌倒區域算地面；沒有傳入區域時永遠是 `False`，「在地上停留過久」不會觸發。`ZonePlanner` 和啟動檢查只用 `observation_zones()`，不會派 Temi 到 `floor=False` 的區域。
+- **派到傷患旁：** `NearPersonDispatch` 同時當 `planner` 和 `robot` 傳給 `IncidentManager`，所以不用改流程：`choose()` 回傳「傷患旁 (x=…, y=…, yaw=…)」並記住對應座標，`go_to()` 收到這個名稱就呼叫 `TemiAppController.go_to_position()`，失敗時在剩餘時間內改去觀察點。`floor_map.json` 的影像座標是畫面比例，地圖座標是公尺；`yaw` 單位（弧度）尚待實機確認。任何事件送出後，要先看到人站直才會重新計時，這個狀態不會被 `reset()` 清掉。
 - **隱私：** 系統不儲存影像。`fall_response/logs/`、模型檔（`*.task`）和影片都已列在 `.gitignore`，不要上傳。
 
 ## 協作規範
@@ -94,8 +98,11 @@ python -m fall_response.main --source 0 --robot dry-run        # 試跑派遣，
 python -m fall_response.main --source 0 --robot rim            # 偵測到跌倒時真的派遣 Temi
 python -m fall_response.temi_app --url http://TemiIP:8080 --list   # 列出 Temi App 上的地點，不會移動 Temi
 python -m fall_response.main --source 0 --robot app --temi-app-url http://TemiIP:8080  # 透過 Java App 派遣
+python -m fall_response.temi_app --url http://TemiIP:8080 --position    # 讀 Temi 地圖座標（near_person 版 App），不會移動
+python -m fall_response.floor_map --source 0 --temi-app-url http://TemiIP:8080  # 量測地板座標
+python -m fall_response.main --source 0 --robot app --temi-app-url http://TemiIP:8080 --near-person  # 派到傷患旁
 ```
 
-`temi_rim --go`、`temi_app --go`、`--robot rim` 和 `--robot app` 會讓 Temi 真的移動，執行前要先問過使用者。RIM2 是全班共用帳號，有多台 Temi 和其他組的 eRoute，不要修改或刪除別組的任務。
+`temi_rim --go`、`temi_app --go`／`--go-xy`、`--robot rim` 和 `--robot app` 會讓 Temi 真的移動，執行前要先問過使用者。RIM2 是全班共用帳號，有多台 Temi 和其他組的 eRoute，不要修改或刪除別組的任務。
 
 測試輸出中的 `RuntimeError`、「無法連線影像來源」是測試刻意製造的故障，只要最後是 `OK` 就代表通過。
