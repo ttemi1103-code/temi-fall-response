@@ -233,7 +233,7 @@ class MonitorDisplay(unittest.TestCase):
         callback(Frame(None, 5.5, 3), None, idle)
         callback(Frame(None, 6.5, 4), None, idle)
         self.assertEqual(banners, [None, CONFIRM_BANNER, FALL_BANNER, FALL_BANNER, None])
-        self.assertEqual(FALL_BANNER[0], "偵測到摔倒")
+        self.assertEqual(FALL_BANNER[0], "疑似跌倒，派遣 Temi 確認")
         self.assertTrue(any("peak descent (5s): 2.40" in line for line in all_lines[2]))
 
 

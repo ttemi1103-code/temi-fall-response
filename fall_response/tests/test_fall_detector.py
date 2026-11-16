@@ -9,14 +9,15 @@ from .helpers import FPS, TORSO, make_pose, timeline
 class Scenario:
     """依序播放合成動作，記錄送出的跌倒事件。"""
 
-    def __init__(self):
+    def __init__(self, on_floor=False):
         self.detector = FallDetector()
         self.now = 0.0
         self.events = []
+        self.on_floor = on_floor  # 人是否在框選的地面區域內
 
     def play(self, seconds, pose_at):
         for offset in timeline(seconds):
-            update = self.detector.update(pose_at(offset / seconds), self.now + offset)
+            update = self.detector.update(pose_at(offset / seconds), self.now + offset, on_floor=self.on_floor)
             if update.event:
                 self.events.append(update.event)
         self.now += seconds
@@ -171,10 +172,56 @@ class NormalActivities(unittest.TestCase):
         self.assertEqual(s.events, [])
 
 
+class LongTimeOnFloor(unittest.TestCase):
+    """慢慢癱倒沒有快速下降，靠「在地面區域倒地太久」判定。"""
+
+    def slow_collapse(self, on_floor=True):
+        return Scenario(on_floor).stand().move(10.0, 400, 650, 0, 85)
+
+    def test_slow_collapse_on_floor_is_detected_after_long_down_time(self):
+        s = self.slow_collapse().hold(20.0, 650, 85)
+        self.assertEqual(s.events, [], "還沒到 30 秒")
+        s.hold(10.0, 650, 85)
+        self.assertEqual(len(s.events), 1)
+        self.assertGreaterEqual(s.events[0].onset_delay_s, 30.0)
+        self.assertEqual(s.events[0].position_px[1], 650)
+
+    def test_lying_outside_floor_zone_is_not_detected(self):
+        s = self.slow_collapse(on_floor=False).hold(60.0, 650, 85)
+        self.assertEqual(s.events, [], "例如躺在沙發上")
+
+    def test_standing_up_restarts_the_timer(self):
+        s = self.slow_collapse().hold(20.0, 650, 85).move(2.0, 650, 400, 85, 0).stand(2.0)
+        s.move(10.0, 400, 650, 0, 85).hold(15.0, 650, 85)
+        self.assertEqual(s.events, [])
+
+    def test_brief_occlusion_keeps_the_timer_and_marks_event(self):
+        s = self.slow_collapse().hold(10.0, 650, 85).play(5.0, lambda _: None).hold(20.0, 650, 85)
+        self.assertEqual(len(s.events), 1)
+        self.assertTrue(s.events[0].occluded)
+
+    def test_no_repeated_alarm_while_still_lying_after_reset(self):
+        s = self.slow_collapse().hold(30.0, 650, 85)
+        self.assertEqual(len(s.events), 1)
+        s.detector.reset()
+        s.hold(60.0, 650, 85)
+        self.assertEqual(len(s.events), 1, "事件處理完人還躺著，不應重複警報")
+        s.move(2.0, 650, 400, 85, 0).stand(2.0).move(10.0, 400, 650, 0, 85).hold(30.0, 650, 85)
+        self.assertEqual(len(s.events), 2, "站起來後再倒下要能再次判定")
+
+    def test_fast_fall_is_not_reported_twice(self):
+        s = Scenario(on_floor=True).stand().move(0.6, 400, 650, 0, 85).hold(4.0, 650, 85)
+        self.assertEqual(len(s.events), 1)
+        s.detector.reset()
+        s.hold(60.0, 650, 85)
+        self.assertEqual(len(s.events), 1)
+
+
 class KnownLimits(unittest.TestCase):
     """記錄目前演算法的已知限制：這些情況會漏報，之後要靠實測決定是否調整。"""
 
     def test_very_slow_collapse_is_not_detected(self):
+        """不在框選的地面區域內時才會漏報；在區域內會由 LongTimeOnFloor 判定。"""
         s = Scenario().stand().move(10.0, 400, 650, 0, 85).hold(20.0, 650, 85)
         self.assertEqual(s.events, [])
 

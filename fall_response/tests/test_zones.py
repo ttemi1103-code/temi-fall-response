@@ -173,6 +173,26 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(app.records[0].event.frame_size, (1000, 800))
         self.assertEqual(app.records[0].observation_point, "餐廳")
 
+    def slow_collapse(self, hip_x):
+        poses = [make_pose(hip_x=hip_x) for _ in timeline(2.0)]
+        steps = len(timeline(10.0))
+        poses += [make_pose(hip_x=hip_x, hip_y=400 + 250 * i / steps, angle_deg=85 * i / steps) for i in range(steps)]
+        poses += [make_pose(hip_x=hip_x, hip_y=650, angle_deg=85) for _ in timeline(35.0)]
+        return poses
+
+    def run_app(self, poses):
+        frames = [Frame(FakeImage(), i / 15, i) for i in range(len(poses))]
+        robot = RecordingRobot()
+        manager = IncidentManager(ZonePlanner([SOFA, TABLE], "home base"), robot, SilentLayer(), SilentLayer(), Notifier())
+        FallMonitorApp(FakeEstimator(poses), FallDetector(), manager, floor_zones=[SOFA, TABLE]).run(frames)
+        return robot
+
+    def test_slow_collapse_in_zone_dispatches_temi(self):
+        self.assertEqual(self.run_app(self.slow_collapse(hip_x=800)).locations, ["餐廳"])
+
+    def test_slow_collapse_outside_zones_is_ignored(self):
+        self.assertEqual(self.run_app(self.slow_collapse(hip_x=550)).locations, [])
+
 
 class Display(unittest.TestCase):
     def test_monitor_marks_the_zone_the_person_is_in(self):
