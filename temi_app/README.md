@@ -1,104 +1,71 @@
 # Temi Java App 串接說明
 
 讓電腦上的 Python 跌倒偵測程式透過 Wi-Fi 派遣 Temi，並在 Temi 抵達時收到通知。
-只要把 `FallResponseServer.java` 加進現有的 Temi App，不需要另外建立新的 App。
 
 ```text
 電腦 Python ──POST /goto {"location": "vr"}──▶ Temi App ──▶ robot.goTo("vr")
 電腦 Python ◀──GET /status → "complete"──────── App 監聽 SDK 的導航狀態
 ```
 
-> 這份 Java 程式碼尚未在實機上編譯測試，第一次加入時若出現錯誤，請把 Android Studio 的錯誤訊息貼出來。
+> 這份 Java 程式碼尚未編譯測試，第一次加入時若出現錯誤，請把 Android Studio 的錯誤訊息貼出來。
 
-## 1. 加入檔案
+## 檔案
 
-1. 把 `FallResponseServer.java` 複製到 App 的 `app/src/main/java/你的套件路徑/` 資料夾。
-2. 把檔案第一行的 `package com.example.fallresponse;` 改成 App 實際的套件名稱，和同資料夾的 `MainActivity.java` 第一行相同。
+| 檔案 | 功能 |
+|---|---|
+| `FallResponseServer.java` | 和電腦溝通的 HTTP 服務（port 8080），收到派遣就呼叫 `robot.goTo()`，並記錄 SDK 回報的導航狀態 |
+| `MainActivity.java` | App 畫面：Temi 準備好後啟動服務，顯示電腦要連的網址和 Temi 上的地點 |
 
-## 2. 加入網路權限
+## 1. 建立專案並加入檔案
 
-在 `AndroidManifest.xml` 的 `<manifest>` 裡、`<application>` 外面加入：
+用架好 Temi 開發環境的那台電腦操作。
+
+1. Android Studio 建立新專案（Empty Views Activity、語言選 Java），或使用現有的 Temi 專案。
+2. 在 `app/build.gradle` 的 `dependencies` 加入 Temi SDK（版本照 Temi 官方文件或現有專案使用的版本）：
+   ```gradle
+   implementation 'com.robotemi:sdk:版本號'
+   ```
+3. 把這個資料夾的 2 個 `.java` 檔複製到 `app/src/main/java/你的套件路徑/`。新專案自動產生的 `MainActivity.java` 用這裡的取代。
+4. 把兩個檔案第一行的 `package com.example.fallresponse;` 改成專案實際的套件名稱。
+5. 如果現有專案已經有自己的 `MainActivity`，就不要取代，把 `onRobotReady()` 和 `startServer()` 的內容合併進去。
+
+## 2. 修改 AndroidManifest.xml
+
+在 `<manifest>` 裡、`<application>` 外面加入網路權限：
 
 ```xml
 <uses-permission android:name="android.permission.INTERNET" />
 ```
 
-## 3. 在 MainActivity 啟動
+在 `<application>` 裡加入下面這段，Temi 才會把這個 App 當成 Temi App：
 
-在 Robot 準備好之後啟動，App 關閉時停止。以下是需要加入的部分，請合併到現有的 `MainActivity`：
-
-```java
-import com.robotemi.sdk.Robot;
-import com.robotemi.sdk.listeners.OnRobotReadyListener;
-import java.io.IOException;
-
-public class MainActivity extends AppCompatActivity implements OnRobotReadyListener {
-    private Robot robot;
-    private FallResponseServer fallServer;
-
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        robot = Robot.getInstance();
-        fallServer = new FallResponseServer(robot);   // 預設 port 8080
-    }
-
-    @Override
-    protected void onStart() {
-        super.onStart();
-        robot.addOnRobotReadyListener(this);
-    }
-
-    @Override
-    protected void onStop() {
-        super.onStop();
-        robot.removeOnRobotReadyListener(this);
-    }
-
-    @Override
-    public void onRobotReady(boolean isReady) {
-        if (isReady) {
-            try {
-                fallServer.start();
-            } catch (IOException e) {
-                Log.e("MainActivity", "跌倒派遣服務啟動失敗", e);
-            }
-        }
-    }
-
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        fallServer.stop();
-    }
-}
+```xml
+<meta-data
+    android:name="com.robotemi.sdk.metadata.SKILL"
+    android:value="@string/app_name" />
 ```
 
-如果 `MainActivity` 已經實作 `OnRobotReadyListener`，只要在原本的 `onRobotReady` 裡加上 `fallServer.start()` 即可。
+## 3. 安裝到 Temi
 
-**服務要在 App 被關閉前一直存在。** App 放到背景或被其他 App 取代時，電腦就連不到。
+1. 依 Temi 開發者工具的說明，讓電腦用 `adb` 連上 Temi，在 Android Studio 選 Temi 後按執行。
+2. Temi 準備好後，畫面會顯示「跌倒派遣服務已啟動」、電腦連線網址（例如 `http://192.168.50.20:8080`）和 Temi 上的地點。
+3. 電腦和 Temi 要連同一個 Wi-Fi。
 
-## 4. 找到 Temi 的 IP
+**App 要一直開在前景。** App 放到背景或被其他 App 取代時，電腦就連不到。
 
-在 Temi 的「設定 → 開發者工具」可以看到 Temi 的 Wi-Fi IP，例如 `192.168.50.20`。電腦和 Temi 要連同一個 Wi-Fi。
+## 4. 實驗室測試步驟
 
-## 5. 從電腦測試
+以下指令在 `temi-fall-response` 資料夾執行，先啟用虛擬環境。`TemiIP` 換成 App 畫面上的 IP。由簡單到完整，前一步成功再做下一步。
 
-以下指令在 `temi-fall-response` 資料夾執行，先啟用虛擬環境。
+| 步驟 | 指令 | 成功時 | Temi 會動嗎 |
+|---|---|---|---|
+| 1. 確認連得上 | 瀏覽器開 `http://TemiIP:8080/locations` | 顯示 Temi 上的地點 | 不會 |
+| 2. 列出地點 | `python -m fall_response.temi_app --url http://TemiIP:8080 --list` | 列出地點，名稱要和 `zones.json` 的觀察點一致 | 不會 |
+| 3. 派遣一個點 | `python -m fall_response.temi_app --url http://TemiIP:8080 --go vr` | Temi 走到 vr，電腦顯示「已抵達，花了 X 秒」 | **會** |
+| 4. 中途停止 | 步驟 3 走到一半時，另開視窗執行 `python -m fall_response.temi_app --url http://TemiIP:8080 --stop` | Temi 停下，步驟 3 顯示「導航中止」 | **會** |
+| 5. 完整流程 | `python -m fall_response.main --source 手機串流網址 --robot app --temi-app-url http://TemiIP:8080` | 在區域內跌倒後，Temi 走到該區域的觀察點，log 出現「Temi 已抵達」 | **會** |
 
-列出 Temi 上的地點（不會移動）：
-
-```powershell
-python -m fall_response.temi_app --url http://TemiIP:8080 --list
-```
-
-派遣並等待抵達（**Temi 會移動**）：
-
-```powershell
-python -m fall_response.temi_app --url http://TemiIP:8080 --go vr
-```
-
-成功時會顯示「已抵達，花了 X 秒」。也可以用瀏覽器開 `http://TemiIP:8080/locations`、`http://TemiIP:8080/status` 檢查。
+步驟 3 之後請把電腦畫面上的 log 拍下來，特別是「Temi 導航狀態」那幾行，可以確認 Temi 實際回報的狀態順序。步驟 4 如果沒有顯示「導航中止」也記下來，代表 Temi 停止時回報的狀態和預期不同。
 
 ## 通訊格式
 
@@ -111,10 +78,13 @@ python -m fall_response.temi_app --url http://TemiIP:8080 --go vr
 
 `status` 是 Temi SDK 的導航狀態：`requested`（已收到、尚未開始）、`start`、`calculating`、`going`、`complete`（已抵達）、`abort`（中止）、`reposing`。
 
+修改通訊格式時，Java（`FallResponseServer.java`）和 Python（`fall_response/temi_app.py`）要一起改。
+
 ## 常見問題
 
 | 狀況 | 處理方式 |
 |---|---|
+| App 一直顯示「等待 Temi 準備好」 | 確認 App 是裝在 Temi 上，且 `AndroidManifest.xml` 有加 `com.robotemi.sdk.metadata.SKILL` |
 | 電腦顯示「無法連線 Temi App」 | 確認 App 在前景、電腦和 Temi 在同一個 Wi-Fi、IP 正確 |
 | `Temi 上沒有地點` | 地點名稱要和 Temi 上存的一樣；Temi 會把英文轉成小寫 |
 | 已送出但 Temi 不動 | 確認 Temi 目前的地圖有這個地點，且 Temi 沒有在執行其他任務 |

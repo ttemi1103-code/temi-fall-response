@@ -1,4 +1,4 @@
-package com.example.fallresponse; // 改成組員 App 的套件名稱
+package com.example.fallresponse; // 改成 App 的套件名稱
 
 import android.os.Handler;
 import android.os.Looper;
@@ -36,7 +36,7 @@ import java.util.Locale;
  * status 直接使用 Temi SDK 的導航狀態：start、calculating、going、complete（已抵達）、abort（中止）、reposing，
  * 尚未收到 SDK 回報前為 requested，從未派遣時為 idle。
  *
- * 使用方式：在 onRobotReady(true) 之後呼叫 start()，在 onDestroy() 呼叫 stop()。
+ * 使用方式見 MainActivity.java：在 onRobotReady(true) 之後呼叫 start()，在 onDestroy() 呼叫 stop()。
  * AndroidManifest.xml 需要 &lt;uses-permission android:name="android.permission.INTERNET" /&gt;。
  */
 public class FallResponseServer implements OnGoToLocationStatusChangedListener {
