@@ -20,10 +20,12 @@
 
 用架好 Temi 開發環境的那台電腦操作。
 
-1. Android Studio 建立新專案（Empty Views Activity、語言選 Java），或使用現有的 Temi 專案。
-2. 在 `app/build.gradle` 的 `dependencies` 加入 Temi SDK（版本照 Temi 官方文件或現有專案使用的版本）：
+步驟和課程的「temi 程式教學投影片」第 2～3 章相同，詳細畫面可以對照投影片。
+
+1. Android Studio 建立新專案（Empty Activity、語言選 Java、Minimum SDK 選 **API 23：Android 6.0**，因為 Temi 是 Android 6.0），或使用現有的 Temi 專案。專案名稱和路徑只能用英文和數字。
+2. 在 `app/build.gradle` 的 `dependencies` 加入 Temi SDK，再按 Sync Now（投影片用的是 0.10.75，現有專案若用別的版本就照現有的）：
    ```gradle
-   implementation 'com.robotemi:sdk:版本號'
+   implementation 'com.robotemi:sdk:0.10.75'
    ```
 3. 把這個資料夾的 2 個 `.java` 檔複製到 `app/src/main/java/你的套件路徑/`。新專案自動產生的 `MainActivity.java` 用這裡的取代。
 4. 把兩個檔案第一行的 `package com.example.fallresponse;` 改成專案實際的套件名稱。
@@ -47,7 +49,10 @@
 
 ## 3. 安裝到 Temi
 
-1. 依 Temi 開發者工具的說明，讓電腦用 `adb` 連上 Temi，在 Android Studio 選 Temi 後按執行。
+1. Temi 沒有 USB，要用 Wi-Fi 安裝（投影片第 3 章）：
+   - 在 Temi 的「設定 → 開發人員工具」按「打開 ADB Port」，記下右上角的 IP。
+   - 電腦執行 `adb connect TemiIP`，顯示 `connected to TemiIP:5555` 就成功；一次只能有一台電腦連。
+   - Android Studio 的裝置選單會變成 `rockchip rk3288`，按綠色三角形執行，就會安裝到 Temi 上。
 2. Temi 準備好後，畫面會顯示「跌倒派遣服務已啟動」、電腦連線網址（例如 `http://192.168.50.20:8080`）和 Temi 上的地點。
 3. 電腦和 Temi 要連同一個 Wi-Fi。
 
